@@ -21,6 +21,7 @@ import {
   handleSimulateDelivery,
   handleDiagnostics,
   handleAdminAddSaldo,
+  handleAdminBackup,
 } from "./handlers/admin.js";
 import { startWizard, handleWizardStep } from "./handlers/wizard.js";
 import { keyboards } from "./keyboards.js";
@@ -51,6 +52,7 @@ export async function setupBotCommands(bot: Bot) {
           { command: "remsaldo", description: "➖ Remover Saldo de Cliente" },
           { command: "simular", description: "🧪 Simular Entrega" },
           { command: "diagnostico", description: "🩺 Testar Conexões" },
+          { command: "backup", description: "💾 Baixar Banco SQLite" },
         ],
         { scope: { type: "chat", chat_id: env.ADMIN_ID } }
       );
@@ -110,6 +112,9 @@ export function createBot(): Bot {
   });
   bot.command("diagnostico", (ctx) => {
     if (ctx.from?.id === env.ADMIN_ID) return handleDiagnostics(ctx);
+  });
+  bot.command("backup", (ctx) => {
+    if (ctx.from?.id === env.ADMIN_ID) return handleAdminBackup(ctx);
   });
   bot.command("ajuda", handleCustomerFaq);
 

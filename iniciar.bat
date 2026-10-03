@@ -12,7 +12,23 @@ where node >nul 2>nul
 if %errorlevel% neq 0 (
     echo [ERRO] O Node.js nao foi encontrado no seu computador!
     echo.
-    echo Baixe e instale a versao LTS gratuitamente em:
+    echo Baixe e instale a versao 22 LTS ou superior gratuitamente em:
+    echo https://nodejs.org
+    echo.
+    start https://nodejs.org
+    pause
+    exit /b 1
+)
+
+for /f "tokens=1 delims=." %%v in ('node -v') do (
+    set NODE_RAW=%%v
+    set NODE_VER=!NODE_RAW:~1!
+)
+if !NODE_VER! lss 22 (
+    echo [ERRO] Versao do Node.js incompativel: Node.js !NODE_RAW! detectado.
+    echo Este bot utiliza SQLite nativo de alta velocidade e exige o Node.js versao 22 ou superior.
+    echo.
+    echo Atualize gratuitamente baixando a versao mais recente em:
     echo https://nodejs.org
     echo.
     start https://nodejs.org

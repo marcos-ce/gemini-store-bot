@@ -220,6 +220,15 @@ export const depositRepo = {
     ).run(id);
     return Number(res.changes) > 0;
   },
+
+  getRecentPending(minutes = 30): DepositRecord[] {
+    return db.prepare(`
+      SELECT * FROM deposits 
+      WHERE status = 'pending' 
+        AND mp_payment_id IS NOT NULL 
+        AND created_at >= datetime('now', '-' || ? || ' minutes')
+    `).all(minutes) as unknown as DepositRecord[];
+  },
 };
 
 // ─── Repositório de Pedidos ────────────────────────────────────────────────
@@ -295,5 +304,14 @@ export const orderRepo = {
 
   getRecent(limit = 10): OrderRecord[] {
     return db.prepare("SELECT * FROM orders WHERE status = 'delivered' ORDER BY delivered_at DESC LIMIT ?").all(limit) as unknown as OrderRecord[];
+  },
+
+  getRecentPending(minutes = 30): OrderRecord[] {
+    return db.prepare(`
+      SELECT * FROM orders 
+      WHERE status = 'pending' 
+        AND mp_payment_id IS NOT NULL 
+        AND created_at >= datetime('now', '-' || ? || ' minutes')
+    `).all(minutes) as unknown as OrderRecord[];
   },
 };

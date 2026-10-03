@@ -16,10 +16,10 @@ echo "📦 [1/6] Verificando dependências do sistema..."
 sudo apt-get update -y > /dev/null 2>&1 || true
 sudo apt-get install -y curl git build-essential > /dev/null 2>&1
 
-# 2. Instalação do Node.js 20 LTS se não existir ou for antigo
-if ! command -v node > /dev/null 2>&1 || [ "$(node -v | cut -d'.' -f1 | tr -d 'v')" -lt 18 ]; then
-  echo "📥 [2/6] Instalando Node.js 20 LTS..."
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - > /dev/null 2>&1
+# 2. Instalação do Node.js 22 LTS se não existir ou for antigo (< 22)
+if ! command -v node > /dev/null 2>&1 || [ "$(node -v | cut -d'.' -f1 | tr -d 'v')" -lt 22 ]; then
+  echo "📥 [2/6] Instalando Node.js 22 LTS..."
+  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - > /dev/null 2>&1
   sudo apt-get install -y nodejs > /dev/null 2>&1
 else
   echo "✅ [2/6] Node.js $(node -v) já está instalado."

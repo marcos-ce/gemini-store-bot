@@ -18,6 +18,8 @@ Se você não tem VPS nem quer deixar seu computador ligado, use uma das opçõe
 2. Preencha apenas o `BOT_TOKEN` e seu `ADMIN_ID`.
 3. Clique em **Deploy**. Pronto! O bot já estará rodando 24 horas por dia na nuvem.
 
+> 💡 **Dica de Persistência na Nuvem:** O bot armazena seus dados em `./data/store.sqlite`. Em plataformas como Render ou Railway, configure um **Disco Persistente (Volume)** montado em `/data` (ou aponte a variável `DATA_DIR=/data`) para garantir que suas configurações e saldos de clientes nunca sejam perdidos após reinicializações.
+
 ---
 
 ## ⚡ Opção 2: Instalação em 1 Linha (VPS Linux / Ubuntu / Debian)
@@ -81,8 +83,9 @@ O administrador gerencia toda a loja diretamente pelo chat usando botões intera
 * 💬 **Alterar @ de Suporte**
 * 🧪 **Simular Entrega Grátis (`/simular`)**: Testa a mensagem exata que o cliente recebe sem gastar nada.
 * 🩺 **Autodiagnóstico (`/diagnostico`)**: Testa Telegram, Mercado Pago, Fornecedor e Banco de Dados na hora.
+* 💾 **Backup do Banco (`/backup`)**: Baixa o arquivo `store.sqlite` direto no Telegram com 1 clique para cópia de segurança.
 * 📊 **Relatório Financeiro**: Total de vendas, faturamento bruto e lucro líquido no bolso.
-* 📢 **Aviso aos Clientes**: Envia transmissão (broadcast) para todos os clientes cadastrados.
+* 📢 **Aviso aos Clientes**: Envia transmissão (broadcast) para todos os clientes cadastrados com proteção contra rate-limit.
 
 ---
 
@@ -103,9 +106,10 @@ O cliente não precisa saber de VPS nem de código: ele só envia `/start` no bo
 ## 🔒 Segurança e Confiabilidade
 
 * **Long Polling Nativo:** Não necessita abrir portas, configurar Nginx nem certificados SSL. Funciona em qualquer servidor ou computador mesmo atrás de roteadores/NAT.
+* **Reconciliação Automática:** Rotina de conciliação ativa no boot e a cada 60 segundos que detecta e entrega automaticamente pedidos pagos mesmo após reinicializações.
 * **Idempotência Estrita:** O ID do pagamento do Mercado Pago é enviado como `external_id` para o fornecedor, eliminando qualquer risco de cobrança duplicada.
 * **Exclusão de Tokens:** Qualquer credencial ou chave enviada no chat é imediatamente excluída da conversa pelo bot por questões de segurança.
-* **SQLite em Modo WAL:** Banco de dados ultrarrápido em arquivo único local nativo do Node.js, sem dependências C++ que possam falhar.
+* **SQLite em Modo WAL:** Banco de dados ultrarrápido em arquivo único local nativo do Node.js 22+, sem dependências C++ que possam falhar.
 
 ---
 

@@ -16,7 +16,9 @@ const botToken = process.env.BOT_TOKEN || "";
 const adminId = parseInt(process.env.ADMIN_ID || "0", 10);
 const apiBaseUrl = (process.env.API_BASE_URL || "https://api.hewhotries.tech/v1").replace(/\/+$/, "");
 
-const dataDir = path.resolve(process.cwd(), "data");
+const dataDir = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.resolve(process.cwd(), "data");
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }

@@ -1,4 +1,4 @@
-import { Context } from "grammy";
+import { Context, InputFile } from "grammy";
 import { env } from "../../config/env.js";
 import { settingsRepo, orderRepo, userRepo } from "../../db/database.js";
 import { MasterApiClient } from "../../services/apiClient.js";
@@ -225,6 +225,10 @@ export async function handleAdminCallback(ctx: Context) {
     );
   }
 
+  if (data === "adm_backup") {
+    return handleAdminBackup(ctx);
+  }
+
   if (data === "adm_texts") {
     return ctx.editMessageText(
       `📝 <b>PERSONALIZAÇÃO DE TEXTOS DA LOJA</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -433,8 +437,23 @@ export async function handleAdminPrompt(ctx: Context, promptKey: string, text: s
           { parse_mode: "HTML" }
         );
         sent++;
-      } catch {
-        failed++;
+      } catch (err: any) {
+        if (err?.parameters?.retry_after) {
+          const waitSec = err.parameters.retry_after;
+          await new Promise((r) => setTimeout(r, (waitSec + 1) * 1000));
+          try {
+            await ctx.api.sendMessage(
+              u.id,
+              `📢 <b>COMUNICADO DA LOJA</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n${clean}`,
+              { parse_mode: "HTML" }
+            );
+            sent++;
+          } catch {
+            failed++;
+          }
+        } else {
+          failed++;
+        }
       }
       await new Promise((r) => setTimeout(r, 40));
     }
@@ -626,3 +645,52 @@ export async function handleAdminAddSaldo(ctx: Context) {
     { parse_mode: "HTML", reply_markup: keyboards.adminBackOnly() }
   );
 }
+
+/**
+ * Exporta e envia o arquivo do banco de dados (SQLite) diretamente no chat do Telegram (/backup)
+ */
+export async function handleAdminBackup(ctx: Context) {
+  if (!isAdmin(ctx)) return ctx.reply("⛔ Acesso não autorizado.");
+
+  // Se foi clique em callback, responde a query
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.answerCallbackQuery();
+    } catch {}
+  }
+
+  const waitMsg = await ctx.reply("⏳ <i>Compactando e preparando backup do banco de dados...</i>", {
+    parse_mode: "HTML",
+  });
+
+  try {
+    const stats = orderRepo.getStats();
+    const userCount = userRepo.count();
+
+    await ctx.replyWithDocument(new InputFile(env.DB_PATH, "store.sqlite"), {
+      caption:
+        `💾 <b>BACKUP DO BANCO DE DADOS (SQLITE)</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `• <b>Data:</b> <code>${new Date().toLocaleString("pt-BR")}</code>\n` +
+        `• <b>Clientes Registrados:</b> ${userCount}\n` +
+        `• <b>Vendas Concluídas:</b> ${stats.totalSales}\n\n` +
+        `<blockquote>💡 <b>Como Restaurar:</b>\n` +
+        `Caso troque de servidor ou queira restaurar seus dados, basta colocar este arquivo no diretório <code>data/store.sqlite</code> e reiniciar o bot.</blockquote>`,
+      parse_mode: "HTML",
+    });
+
+    try {
+      await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id);
+    } catch {}
+  } catch (err: any) {
+    try {
+      await ctx.api.editMessageText(
+        ctx.chat!.id,
+        waitMsg.message_id,
+        `❌ <b>Falha ao exportar backup:</b> ${err.message || String(err)}`,
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+  }
+}
+

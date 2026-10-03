@@ -1,4 +1,5 @@
 import { createBot, setupBotCommands } from "./bot/bot.js";
+import { reconcilePendingPayments } from "./bot/handlers/customer.js";
 import { env } from "./config/env.js";
 import { settingsRepo } from "./db/database.js";
 
@@ -30,12 +31,25 @@ async function main() {
 
   console.log("\n🚀 Conectando com a API do Telegram via Long Polling...");
   
+  let reconcileInterval: NodeJS.Timeout | null = null;
+
   // Inicia o bot
   bot.start({
     async onStart(botInfo) {
       console.log(`✅ Bot @${botInfo.username} online e pronto para receber clientes!`);
       // Configura menu nativo e comandos resilientes no Telegram
       await setupBotCommands(bot);
+
+      // Reconciliação imediata de pagamentos pendentes
+      reconcilePendingPayments(bot).catch((err) =>
+        console.warn("[Startup] Aviso na reconciliação de pagamentos:", err)
+      );
+
+      // Rotina periódica de conciliação a cada 60 segundos
+      reconcileInterval = setInterval(() => {
+        reconcilePendingPayments(bot).catch(() => {});
+      }, 60 * 1000);
+
       if (!config.isConfigured && env.ADMIN_ID) {
         console.log(`👉 Abra o Telegram, acesse @${botInfo.username} e envie /start para configurar sua loja.`);
       }
@@ -45,6 +59,7 @@ async function main() {
   // Encerramento seguro
   const shutdown = () => {
     console.log("\n🛑 Encerrando bot de forma segura...");
+    if (reconcileInterval) clearInterval(reconcileInterval);
     bot.stop();
     process.exit(0);
   };

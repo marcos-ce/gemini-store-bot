@@ -150,8 +150,11 @@ export const keyboards = {
       .text("🩺 Diagnóstico", "adm_diag")
       .text("📊 Vendas & Lucro", "adm_stats")
       .row()
-      // Linha 6: Broadcast e Visualização
+      // Linha 6: Broadcast e Backup
       .text("📢 Enviar Aviso", "adm_broadcast")
+      .text("💾 Baixar Backup", "adm_backup")
+      .row()
+      // Linha 7: Visualização
       .text("🏪 Ver Minha Loja (Cliente)", "adm_preview")
       .row();
   },

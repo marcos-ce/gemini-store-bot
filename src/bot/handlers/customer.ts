@@ -1,4 +1,4 @@
-import { Context, InputFile } from "grammy";
+import { Context, InputFile, Api, Bot } from "grammy";
 import { env } from "../../config/env.js";
 import { settingsRepo, orderRepo, userRepo, depositRepo } from "../../db/database.js";
 import { MasterApiClient } from "../../services/apiClient.js";
@@ -231,13 +231,13 @@ export async function handleDepositSelect(ctx: Context, amountBrl: number) {
     sentMessageId = msg.message_id;
   }
 
-  startDepositPolling(ctx, depId, payment.id, sentMessageId);
+  startDepositPolling(ctx.api, depId, payment.id, sentMessageId);
 }
 
 /**
  * Loop de Polling para Recarga de Saldo
  */
-function startDepositPolling(ctx: Context, depId: string, mpPaymentId: string, messageId: number) {
+export function startDepositPolling(botApi: Api, depId: string, mpPaymentId: string, messageId?: number) {
   if (activePollingMap.has(depId)) return;
   activePollingMap.add(depId);
 
@@ -252,13 +252,14 @@ function startDepositPolling(ctx: Context, depId: string, mpPaymentId: string, m
     }
 
     const config = settingsRepo.getConfig();
+    if (!config.mpAccessToken) return;
     const mp = new MercadoPagoService(config.mpAccessToken);
     const status = await mp.getPaymentStatus(mpPaymentId);
 
     if (status.approved) {
       clearInterval(interval);
       activePollingMap.delete(depId);
-      await processSuccessfulDeposit(ctx, depId, messageId);
+      await processSuccessfulDeposit(botApi, depId, messageId);
     }
   }, 3500);
 }
@@ -266,7 +267,7 @@ function startDepositPolling(ctx: Context, depId: string, mpPaymentId: string, m
 /**
  * Credita o saldo na carteira e notifica
  */
-async function processSuccessfulDeposit(ctx: Context, depId: string, messageId?: number) {
+export async function processSuccessfulDeposit(botApi: Api, depId: string, messageId?: number) {
   const dep = depositRepo.getById(depId);
   if (!dep || dep.status === "approved") return;
 
@@ -280,13 +281,13 @@ async function processSuccessfulDeposit(ctx: Context, depId: string, messageId?:
   // Apaga a foto com o QR Code antigo para não poluir o histórico
   if (messageId) {
     try {
-      await ctx.api.deleteMessage(dep.user_id, messageId);
+      await botApi.deleteMessage(dep.user_id, messageId);
     } catch {}
   }
 
   // Notifica o cliente
   try {
-    await ctx.api.sendMessage(
+    await botApi.sendMessage(
       dep.user_id,
       `🎉 <b>RECARGA CONFIRMADA COM SUCESSO!</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -306,7 +307,7 @@ async function processSuccessfulDeposit(ctx: Context, depId: string, messageId?:
 
   // Notifica o dono da loja
   try {
-    await ctx.api.sendMessage(
+    await botApi.sendMessage(
       env.ADMIN_ID,
       `💰 <b>NOVA RECARGA DE SALDO RECEBIDA!</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -620,13 +621,18 @@ export async function executeDirectPixCheckout(ctx: Context) {
     sentMessageId = textMsg.message_id;
   }
 
-  startPaymentPolling(ctx, orderId, payment.id, sentMessageId);
+  startPaymentPolling(ctx.api, orderId, payment.id, sentMessageId);
 }
 
 /**
  * Loop de verificação de pagamento automático em background
  */
-function startPaymentPolling(ctx: Context, orderId: string, mpPaymentId: string, messageId: number) {
+export function startPaymentPolling(
+  botApi: Api,
+  orderId: string,
+  mpPaymentId: string,
+  messageId?: number
+) {
   if (activePollingMap.has(orderId)) return;
   activePollingMap.add(orderId);
 
@@ -642,13 +648,14 @@ function startPaymentPolling(ctx: Context, orderId: string, mpPaymentId: string,
     }
 
     const config = settingsRepo.getConfig();
+    if (!config.mpAccessToken) return;
     const mp = new MercadoPagoService(config.mpAccessToken);
     const status = await mp.getPaymentStatus(mpPaymentId);
 
     if (status.approved) {
       clearInterval(interval);
       activePollingMap.delete(orderId);
-      await processSuccessfulDelivery(ctx, orderId, mpPaymentId, messageId);
+      await processSuccessfulDelivery(botApi, orderId, mpPaymentId, messageId);
     }
   }, intervalMs);
 }
@@ -656,8 +663,8 @@ function startPaymentPolling(ctx: Context, orderId: string, mpPaymentId: string,
 /**
  * Processa a entrega do produto via API mestra e notifica o cliente e o dono
  */
-async function processSuccessfulDelivery(
-  ctx: Context,
+export async function processSuccessfulDelivery(
+  botApi: Api,
   orderId: string,
   mpPaymentId: string,
   messageId?: number
@@ -674,7 +681,7 @@ async function processSuccessfulDelivery(
     orderRepo.markFailed(orderId, deliveryResult.error || "Erro de emissão");
 
     try {
-      await ctx.api.sendMessage(
+      await botApi.sendMessage(
         env.ADMIN_ID,
         `🚨 <b>FALHA NA ENTREGA AUTOMÁTICA!</b>\n\n` +
           `O pedido <code>${orderId}</code> foi pago no Mercado Pago, mas a API mestra retornou erro:\n` +
@@ -684,7 +691,7 @@ async function processSuccessfulDelivery(
       );
     } catch {}
 
-    return ctx.api.sendMessage(
+    return botApi.sendMessage(
       order.user_id,
       `✅ <b>Seu pagamento foi confirmado com sucesso!</b>\n\n` +
         `Nosso sistema está finalizando os detalhes do seu acesso. Caso não receba em até 5 minutos, fale com nosso suporte: @${config.supportUsername || "Admin"}\n` +
@@ -722,12 +729,12 @@ async function processSuccessfulDelivery(
   // Apaga a mensagem com a foto do QR Code que já foi paga para deixar o chat 100% limpo
   if (messageId) {
     try {
-      await ctx.api.deleteMessage(order.user_id, messageId);
+      await botApi.deleteMessage(order.user_id, messageId);
     } catch {}
   }
 
   try {
-    await ctx.api.sendMessage(order.user_id, successText, {
+    await botApi.sendMessage(order.user_id, successText, {
       parse_mode: "HTML",
       reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
     });
@@ -735,7 +742,7 @@ async function processSuccessfulDelivery(
 
   const profit = config.salePriceBrl - 15.0;
   try {
-    await ctx.api.sendMessage(
+    await botApi.sendMessage(
       env.ADMIN_ID,
       `🎉 <b>NOVA VENDA CONCLUÍDA NO SEU BOT!</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -773,7 +780,7 @@ export async function handleCheckPix(ctx: Context, orderId: string) {
   if (status.approved) {
     await ctx.answerCallbackQuery({ text: "✅ Pagamento aprovado! Entregando..." });
     const msgId = ctx.callbackQuery?.message?.message_id;
-    return processSuccessfulDelivery(ctx, orderId, order.mp_payment_id, msgId);
+    return processSuccessfulDelivery(ctx.api, orderId, order.mp_payment_id, msgId);
   }
 
   return ctx.answerCallbackQuery({
@@ -804,7 +811,7 @@ export async function handleCheckDeposit(ctx: Context, depId: string) {
   if (status.approved) {
     await ctx.answerCallbackQuery({ text: "✅ Pagamento aprovado! Creditando saldo..." });
     const msgId = ctx.callbackQuery?.message?.message_id;
-    return processSuccessfulDeposit(ctx, depId, msgId);
+    return processSuccessfulDeposit(ctx.api, depId, msgId);
   }
 
   return ctx.answerCallbackQuery({
@@ -833,4 +840,56 @@ export async function handleCancelDeposit(ctx: Context, depId: string) {
     await ctx.deleteMessage();
   } catch {}
   return handleWallet(ctx);
+}
+
+/**
+ * Reconcilia pedidos e depósitos pendentes recentes (executado no startup e em loop periódico)
+ */
+export async function reconcilePendingPayments(bot: Bot) {
+  const config = settingsRepo.getConfig();
+  if (!config.mpAccessToken) return;
+
+  const mp = new MercadoPagoService(config.mpAccessToken);
+
+  // 1. Reconciliação de Pedidos Pendentes
+  try {
+    const pendingOrders = orderRepo.getRecentPending(30);
+    for (const order of pendingOrders) {
+      if (!order.mp_payment_id) continue;
+      try {
+        const status = await mp.getPaymentStatus(order.mp_payment_id);
+        if (status.approved) {
+          console.log(`[Reconciliação] Pedido aprovado detectado: ${order.id}`);
+          await processSuccessfulDelivery(bot.api, order.id, order.mp_payment_id);
+        } else if (status.status === "pending" && !activePollingMap.has(order.id)) {
+          startPaymentPolling(bot.api, order.id, order.mp_payment_id);
+        }
+      } catch (err) {
+        console.warn(`[Reconciliação] Erro ao checar pedido ${order.id}:`, err);
+      }
+    }
+  } catch (err) {
+    console.warn("[Reconciliação] Erro ao buscar pedidos pendentes:", err);
+  }
+
+  // 2. Reconciliação de Depósitos Pendentes
+  try {
+    const pendingDeposits = depositRepo.getRecentPending(30);
+    for (const dep of pendingDeposits) {
+      if (!dep.mp_payment_id) continue;
+      try {
+        const status = await mp.getPaymentStatus(dep.mp_payment_id);
+        if (status.approved) {
+          console.log(`[Reconciliação] Depósito aprovado detectado: ${dep.id}`);
+          await processSuccessfulDeposit(bot.api, dep.id);
+        } else if (status.status === "pending" && !activePollingMap.has(dep.id)) {
+          startDepositPolling(bot.api, dep.id, dep.mp_payment_id);
+        }
+      } catch (err) {
+        console.warn(`[Reconciliação] Erro ao checar depósito ${dep.id}:`, err);
+      }
+    }
+  } catch (err) {
+    console.warn("[Reconciliação] Erro ao buscar depósitos pendentes:", err);
+  }
 }
