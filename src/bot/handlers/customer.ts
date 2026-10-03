@@ -124,7 +124,7 @@ export async function handleWallet(ctx: Context) {
   const balFormatted = balBrl.toFixed(2).replace(".", ",");
 
   const text =
-    `💰 <b>MINHA CARTEIRA DE SALDO</b>\n` +
+    `💰 <b>CARTEIRA</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `👤 <b>Cliente:</b> @${ctx.from.username || ctx.from.first_name}\n` +
     `💳 <b>Saldo Atual: R$ ${balFormatted}</b>\n\n` +

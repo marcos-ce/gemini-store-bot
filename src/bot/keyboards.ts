@@ -13,7 +13,7 @@ export const keyboards = {
 
     // Opção de Carteira (se ativada pelo dono)
     if (walletEnabled) {
-      kb.text("💰 Minha Carteira & Saldo", "nav_wallet").row();
+      kb.text("💰 Carteira", "nav_wallet").row();
     }
 
     // Botões de apoio
