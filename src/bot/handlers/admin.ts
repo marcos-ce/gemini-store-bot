@@ -88,7 +88,15 @@ export async function showAdminPanel(ctx: Context, editMessage = false, targetMs
       });
       lastAdminPanelMessageId = msgIdToEdit;
       return;
-    } catch {}
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      if (errMsg.includes("message is not modified")) {
+        try {
+          await ctx.answerCallbackQuery();
+        } catch {}
+        return;
+      }
+    }
   }
 
   // Se foi comando (/admin), apaga o comando digitado para manter o chat limpo

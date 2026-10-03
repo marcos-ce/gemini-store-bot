@@ -28,6 +28,38 @@ import { keyboards } from "./keyboards.js";
 // Rastreamento de clientes digitando valor de recarga personalizada (userId -> promptMsgId)
 const customDepositPromptUsers = new Map<number, number>();
 
+/**
+ * Configura o botão azul oficial 'Menu' do Telegram e seus comandos de forma resiliente
+ */
+export async function setupBotCommands(bot: Bot) {
+  try {
+    // Comandos públicos para qualquer cliente
+    await bot.api.setMyCommands([
+      { command: "start", description: "🏪 Início da Loja" },
+      { command: "carteira", description: "💰 Carteira & Saldo" },
+      { command: "ajuda", description: "❓ Como Funciona e Suporte" },
+    ]);
+
+    // Comandos avançados para o Dono da Loja (Admin)
+    if (env.ADMIN_ID) {
+      await bot.api.setMyCommands(
+        [
+          { command: "admin", description: "🛡️ Painel de Controle" },
+          { command: "start", description: "🏪 Visão do Cliente" },
+          { command: "carteira", description: "💰 Carteira" },
+          { command: "addsaldo", description: "➕ Adicionar Saldo a Cliente" },
+          { command: "remsaldo", description: "➖ Remover Saldo de Cliente" },
+          { command: "simular", description: "🧪 Simular Entrega" },
+          { command: "diagnostico", description: "🩺 Testar Conexões" },
+        ],
+        { scope: { type: "chat", chat_id: env.ADMIN_ID } }
+      );
+    }
+  } catch (err) {
+    console.warn("[Bot Commands] Aviso ao configurar comandos nativos do Telegram:", err);
+  }
+}
+
 export function createBot(): Bot {
   if (!env.BOT_TOKEN) {
     throw new Error("BOT_TOKEN não foi configurado no arquivo .env");
@@ -35,12 +67,34 @@ export function createBot(): Bot {
 
   const bot = new Bot(env.BOT_TOKEN);
 
-  // ─── Middleware Global: Registro de Usuários ──────────────────────────────
+  // ─── Middleware Global: Resiliência contra Erros e Stale Queries ──────────
   bot.use(async (ctx, next) => {
-    if (ctx.from) {
-      userRepo.touch(ctx.from.id, ctx.from.username, ctx.from.first_name);
+    try {
+      if (ctx.from) {
+        userRepo.touch(ctx.from.id, ctx.from.username, ctx.from.first_name);
+      }
+      await next();
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      if (errMsg.includes("message is not modified")) {
+        try {
+          await ctx.answerCallbackQuery();
+        } catch {}
+        return;
+      }
+      if (errMsg.includes("query is too old")) {
+        return;
+      }
+      console.error(`[Bot Error] Falha na requisição ${ctx.update.update_id}:`, errMsg);
+      if (ctx.callbackQuery) {
+        try {
+          await ctx.answerCallbackQuery({
+            text: "⚠️ Ação concluída ou expirada.",
+            show_alert: false,
+          });
+        } catch {}
+      }
     }
-    await next();
   });
 
   // ─── Comandos Básicos ─────────────────────────────────────────────────────
@@ -147,7 +201,7 @@ export function createBot(): Bot {
   // Callbacks do Painel Admin
   bot.callbackQuery(/^adm_/, handleAdminCallback);
 
-  // ─── Tratamento de Mensagens de Texto ─────────────────────────────────────
+  // ─── Tratamento de Mensagens de Texto (Resiliente) ────────────────────────
   bot.on("message:text", async (ctx) => {
     // 1. Verifica se o cliente está digitando valor de recarga personalizada
     if (customDepositPromptUsers.has(ctx.from.id)) {
@@ -192,28 +246,66 @@ export function createBot(): Bot {
       return handleDepositSelect(ctx, val);
     }
 
-    // 2. Se for o Admin, verifica prompts ativos
-    if (ctx.from.id !== env.ADMIN_ID) return;
+    // 2. Se for o Admin, verifica prompts ativos de configuração
+    if (ctx.from.id === env.ADMIN_ID) {
+      const config = settingsRepo.getConfig();
+      const prompt = config.activePromptKey;
 
-    const config = settingsRepo.getConfig();
-    const prompt = config.activePromptKey;
+      if (prompt) {
+        const text = ctx.message.text;
 
-    if (!prompt) return;
+        // Se estiver no assistente de primeiro boot
+        if (prompt.startsWith("wiz_")) {
+          return handleWizardStep(ctx, prompt, text);
+        }
 
-    const text = ctx.message.text;
-
-    // Se estiver no assistente de primeiro boot
-    if (prompt.startsWith("wiz_")) {
-      return handleWizardStep(ctx, prompt, text);
+        // Se for prompt comum do menu admin
+        return handleAdminPrompt(ctx, prompt, text);
+      }
     }
 
-    // Se for prompt comum do menu admin
-    return handleAdminPrompt(ctx, prompt, text);
-  });
+    // 3. Fallback inteligente e resiliente para clientes (reconhece termos e nunca deixa sem resposta)
+    const lower = ctx.message.text.toLowerCase().trim();
+    if (
+      lower.includes("comprar") ||
+      lower.includes("preço") ||
+      lower.includes("preco") ||
+      lower.includes("quero") ||
+      lower.includes("pix")
+    ) {
+      return handleBuyNow(ctx);
+    }
+    if (lower.includes("carteira") || lower.includes("saldo") || lower.includes("recarga")) {
+      return handleWallet(ctx);
+    }
+    if (
+      lower.includes("funciona") ||
+      lower.includes("duvida") ||
+      lower.includes("ajuda") ||
+      lower.includes("como") ||
+      lower.includes("regras")
+    ) {
+      return handleCustomerFaq(ctx);
+    }
+    if (
+      lower.includes("suporte") ||
+      lower.includes("falar") ||
+      lower.includes("contato") ||
+      lower.includes("atendente")
+    ) {
+      const config = settingsRepo.getConfig();
+      return ctx.reply(
+        `💬 <b>SUPORTE & ATENDIMENTO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+          `Para dúvidas sobre pedidos, pagamentos ou suporte técnico, fale diretamente com: @${config.supportUsername || "Admin"}`,
+        {
+          parse_mode: "HTML",
+          reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+        }
+      );
+    }
 
-  // ─── Tratamento de Erros Global ───────────────────────────────────────────
-  bot.catch((err) => {
-    console.error(`[Bot Error] Falha na requisição ${err.ctx.update.update_id}:`, err.error);
+    // Se o cliente enviar qualquer mensagem comum ("oi", "olá", "menu"), exibe a loja acolhendo o cliente
+    return handleCustomerStart(ctx);
   });
 
   return bot;

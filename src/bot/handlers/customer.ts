@@ -29,8 +29,19 @@ export async function editOrReply(
         await ctx.deleteMessage();
       } catch {}
       return await ctx.reply(text, options);
-    } catch {
-      return await ctx.reply(text, options);
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      // Se o usuário clicou no mesmo botão e o conteúdo não mudou, apenas responde silenciosamente
+      if (errMsg.includes("message is not modified")) {
+        try {
+          await ctx.answerCallbackQuery();
+        } catch {}
+        return;
+      }
+      // Se a mensagem original foi apagada ou expirou, envia um novo menu limpo
+      try {
+        return await ctx.reply(text, options);
+      } catch {}
     }
   }
   return await ctx.reply(text, options);

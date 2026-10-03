@@ -1,4 +1,4 @@
-import { createBot } from "./bot/bot.js";
+import { createBot, setupBotCommands } from "./bot/bot.js";
 import { env } from "./config/env.js";
 import { settingsRepo } from "./db/database.js";
 
@@ -32,8 +32,10 @@ async function main() {
   
   // Inicia o bot
   bot.start({
-    onStart(botInfo) {
+    async onStart(botInfo) {
       console.log(`✅ Bot @${botInfo.username} online e pronto para receber clientes!`);
+      // Configura menu nativo e comandos resilientes no Telegram
+      await setupBotCommands(bot);
       if (!config.isConfigured && env.ADMIN_ID) {
         console.log(`👉 Abra o Telegram, acesse @${botInfo.username} e envie /start para configurar sua loja.`);
       }
