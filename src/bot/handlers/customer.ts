@@ -1,6 +1,6 @@
 import { Context, InputFile } from "grammy";
 import { env } from "../../config/env.js";
-import { settingsRepo, orderRepo, userRepo } from "../../db/database.js";
+import { settingsRepo, orderRepo, userRepo, depositRepo } from "../../db/database.js";
 import { MasterApiClient } from "../../services/apiClient.js";
 import { MercadoPagoService } from "../../services/mercadopago.js";
 import { keyboards } from "../keyboards.js";
@@ -50,7 +50,7 @@ export async function handleCustomerStart(ctx: Context) {
 
   return ctx.reply(welcomeText, {
     parse_mode: "HTML",
-    reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername),
+    reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
   });
 }
 
@@ -75,12 +75,198 @@ export async function handleCustomerFaq(ctx: Context) {
 
   return ctx.reply(faqText, {
     parse_mode: "HTML",
-    reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername),
+    reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
   });
 }
 
 /**
- * Inicia o Checkout PIX
+ * Visualização da Carteira do Cliente (/carteira)
+ */
+export async function handleWallet(ctx: Context) {
+  if (!ctx.from) return;
+  const config = settingsRepo.getConfig();
+
+  if (!config.walletEnabled) {
+    return ctx.reply("ℹ️ O sistema de carteira está desativado nesta loja.", {
+      reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, false),
+    });
+  }
+
+  const balCents = userRepo.getBalance(ctx.from.id);
+  const balBrl = balCents / 100;
+  const balFormatted = balBrl.toFixed(2).replace(".", ",");
+
+  const text =
+    `💰 <b>MINHA CARTEIRA DE SALDO</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `👤 <b>Cliente:</b> @${ctx.from.username || ctx.from.first_name}\n` +
+    `💳 <b>Saldo Atual: R$ ${balFormatted}</b>\n\n` +
+    `<blockquote>` +
+    `💡 <b>Vantagens de ter Saldo:</b>\n` +
+    `• Compre produtos instantaneamente em 1 clique.\n` +
+    `• Não precisa abrir o app do banco a cada compra.\n` +
+    `• Seu saldo nunca expira e fica seguro na sua conta.` +
+    `</blockquote>\n\n` +
+    `Escolha um valor abaixo para recarregar via PIX automático:`;
+
+  return ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: keyboards.walletMenu(balBrl),
+  });
+}
+
+/**
+ * Criação de PIX para Recarga de Carteira
+ */
+export async function handleDepositSelect(ctx: Context, amountBrl: number) {
+  if (!ctx.from) return;
+  const config = settingsRepo.getConfig();
+
+  if (!config.mpAccessToken) {
+    return ctx.reply("⚠️ Sistema de recarga em rápida manutenção.");
+  }
+
+  const waitMsg = await ctx.reply("⏳ <i>Gerando PIX de recarga...</i>", { parse_mode: "HTML" });
+
+  const depId = `DEP-${Date.now().toString(36).toUpperCase()}`;
+  const mp = new MercadoPagoService(config.mpAccessToken);
+
+  const pix = await mp.createPix({
+    amountBrl,
+    description: `${config.storeName} - Recarga de Saldo R$ ${amountBrl.toFixed(2)}`,
+    externalReference: depId,
+    payerEmail: `dep_${ctx.from.id}@gmail.com`,
+  });
+
+  if (!pix.ok || !pix.payment) {
+    return ctx.api.editMessageText(ctx.chat!.id, waitMsg.message_id, `❌ Falha ao gerar PIX: ${pix.error}`);
+  }
+
+  const payment = pix.payment;
+  depositRepo.create({
+    id: depId,
+    userId: ctx.from.id,
+    amountCents: Math.round(amountBrl * 100),
+    mpPaymentId: payment.id,
+  });
+
+  try {
+    await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id);
+  } catch {}
+
+  const formattedAmount = amountBrl.toFixed(2).replace(".", ",");
+  const captionText =
+    `💰 <b>RECARGA DE CARTEIRA VIA PIX</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `💵 <b>Valor da Recarga:</b> R$ ${formattedAmount}\n` +
+    `🆔 <b>ID da Recarga:</b> <code>${depId}</code>\n\n` +
+    `<blockquote>` +
+    `📱 <b>Como Pagar:</b>\n` +
+    `1. Copie o código PIX abaixo.\n` +
+    `2. Pague no app do seu banco (PIX Copia e Cola).\n` +
+    `3. Seu saldo será creditado automaticamente na sua carteira!` +
+    `</blockquote>\n\n` +
+    `🔑 <b>Código PIX:</b>\n` +
+    `<code>${payment.qrCode}</code>\n\n` +
+    `⏳ <i>Aguardando pagamento do banco...</i>`;
+
+  let sentMessageId: number;
+  if (payment.qrCodeBuffer) {
+    const photo = await ctx.replyWithPhoto(new InputFile(payment.qrCodeBuffer, "dep-qrcode.png"), {
+      caption: captionText,
+      parse_mode: "HTML",
+      reply_markup: keyboards.depositCheckout(payment.qrCode, depId),
+    });
+    sentMessageId = photo.message_id;
+  } else {
+    const msg = await ctx.reply(captionText, {
+      parse_mode: "HTML",
+      reply_markup: keyboards.depositCheckout(payment.qrCode, depId),
+    });
+    sentMessageId = msg.message_id;
+  }
+
+  startDepositPolling(ctx, depId, payment.id, sentMessageId);
+}
+
+/**
+ * Loop de Polling para Recarga de Saldo
+ */
+function startDepositPolling(ctx: Context, depId: string, mpPaymentId: string, messageId: number) {
+  if (activePollingMap.has(depId)) return;
+  activePollingMap.add(depId);
+
+  const startTime = Date.now();
+  const maxDurationMs = 15 * 60 * 1000;
+
+  const interval = setInterval(async () => {
+    if (Date.now() - startTime > maxDurationMs) {
+      clearInterval(interval);
+      activePollingMap.delete(depId);
+      return;
+    }
+
+    const config = settingsRepo.getConfig();
+    const mp = new MercadoPagoService(config.mpAccessToken);
+    const status = await mp.getPaymentStatus(mpPaymentId);
+
+    if (status.approved) {
+      clearInterval(interval);
+      activePollingMap.delete(depId);
+      await processSuccessfulDeposit(ctx, depId);
+    }
+  }, 3500);
+}
+
+/**
+ * Credita o saldo na carteira e notifica
+ */
+async function processSuccessfulDeposit(ctx: Context, depId: string) {
+  const dep = depositRepo.getById(depId);
+  if (!dep || dep.status === "approved") return;
+
+  depositRepo.markApproved(depId);
+  const newBalCents = userRepo.addBalance(dep.user_id, dep.amount_cents);
+  const newBalBrl = (newBalCents / 100).toFixed(2).replace(".", ",");
+  const depBrl = (dep.amount_cents / 100).toFixed(2).replace(".", ",");
+
+  // Notifica o cliente
+  try {
+    await ctx.api.sendMessage(
+      dep.user_id,
+      `🎉 <b>RECARGA CONFIRMADA COM SUCESSO!</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `💵 <b>Valor Creditado:</b> R$ ${depBrl}\n` +
+        `💳 <b>Seu Novo Saldo: R$ ${newBalBrl}</b>\n\n` +
+        `👉 <i>Você já pode comprar seus produtos com 1 clique usando seu saldo!</i>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboards.customerMain(
+          settingsRepo.getConfig().salePriceBrl,
+          settingsRepo.getConfig().supportUsername,
+          true
+        ),
+      }
+    );
+  } catch {}
+
+  // Notifica o dono da loja
+  try {
+    await ctx.api.sendMessage(
+      env.ADMIN_ID,
+      `💰 <b>NOVA RECARGA DE SALDO RECEBIDA!</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `👤 <b>Cliente:</b> (ID: <code>${dep.user_id}</code>)\n` +
+        `💵 <b>Valor Recebido no Mercado Pago:</b> <code>R$ ${depBrl}</code>\n` +
+        `🆔 <b>ID Recarga:</b> <code>${depId}</code>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━`,
+      { parse_mode: "HTML" }
+    );
+  } catch {}
+}
+
+/**
+ * Inicia o Checkout do Produto (Verifica se cliente tem saldo para oferecer 1-Clique)
  */
 export async function handleBuyNow(ctx: Context) {
   if (!ctx.from) return;
@@ -98,16 +284,160 @@ export async function handleBuyNow(ctx: Context) {
     return ctx.reply("⚠️ Loja em rápida manutenção. Por favor, tente novamente em instantes.");
   }
 
+  // 2. Se a carteira estiver ativa e o cliente tiver saldo, oferece escolha
+  if (config.walletEnabled) {
+    const balCents = userRepo.getBalance(ctx.from.id);
+    const balBrl = balCents / 100;
+
+    if (balBrl >= config.salePriceBrl) {
+      const priceFormatted = config.salePriceBrl.toFixed(2).replace(".", ",");
+      const balFormatted = balBrl.toFixed(2).replace(".", ",");
+
+      return ctx.reply(
+        `💳 <b>COMO DESEJA CONCLUIR SEU PEDIDO?</b>\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `📦 <b>Produto:</b> Google 5TB - Gemini PRO 18 MESES\n` +
+          `💵 <b>Valor:</b> R$ ${priceFormatted}\n\n` +
+          `💰 <b>Seu Saldo em Carteira:</b> R$ ${balFormatted}\n\n` +
+          `Escolha a forma de pagamento:`,
+        {
+          parse_mode: "HTML",
+          reply_markup: keyboards.checkoutOptions(config.salePriceBrl, balBrl),
+        }
+      );
+    }
+  }
+
+  // Se não tiver saldo suficiente, vai direto para o PIX do produto
+  return executeDirectPixCheckout(ctx);
+}
+
+/**
+ * Compra com 1 Clique usando o Saldo da Carteira
+ */
+export async function handleBuyWithWallet(ctx: Context) {
+  if (!ctx.from) return;
+
+  const config = settingsRepo.getConfig();
+  const priceCents = Math.round(config.salePriceBrl * 100);
+
+  // 1. Débito atômico na carteira local
+  const debited = userRepo.debitBalance(ctx.from.id, priceCents);
+  if (!debited) {
+    return ctx.reply("❌ Saldo insuficiente na carteira para concluir esta compra.");
+  }
+
+  const waitMsg = await ctx.reply("⏳ <i>Emitindo seu produto imediatamente via API...</i>", {
+    parse_mode: "HTML",
+  });
+
+  const orderId = `ORD-${Date.now().toString(36).toUpperCase()}`;
+
+  orderRepo.create({
+    id: orderId,
+    userId: ctx.from.id,
+    userName: ctx.from.username || ctx.from.first_name,
+    productName: "Google 5TB - Gemini PRO 18 MESES",
+    priceCents,
+    costCents: 1500,
+  });
+
+  const client = new MasterApiClient(config.apiBaseUrl, config.resellerApiKey);
+  const deliveryResult = await client.createOrder(`WALLET-${orderId}`, "gemini-link-pro-18months");
+
+  if (!deliveryResult.ok || !deliveryResult.order?.delivered_value) {
+    // Estorna saldo do cliente na hora em caso de falha de fornecedor
+    userRepo.addBalance(ctx.from.id, priceCents);
+    orderRepo.markFailed(orderId, deliveryResult.error || "Erro de emissão");
+
+    try {
+      await ctx.api.editMessageText(
+        ctx.chat!.id,
+        waitMsg.message_id,
+        `⚠️ <b>Falha temporária no fornecimento.</b>\n` +
+          `O valor foi <b>estornado integralmente</b> para sua carteira.\n` +
+          `Erro: ${deliveryResult.error || "Tente novamente em instantes."}`
+      );
+    } catch {}
+
+    // Alerta o dono da loja
+    try {
+      await ctx.api.sendMessage(
+        env.ADMIN_ID,
+        `🚨 <b>FALHA NA EMISSÃO VIA CARTEIRA:</b>\nPedido: ${orderId}\nErro: ${deliveryResult.error}`,
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+
+    return;
+  }
+
+  const link = deliveryResult.order.delivered_value;
+  orderRepo.markDelivered(orderId, link);
+
+  const defaultInstructions =
+    `<blockquote>` +
+    `📖 <b>Como Ativar seu Acesso:</b>\n` +
+    `1. Clique no link acima para abrir o convite oficial do Google.\n` +
+    `2. Escolha sua conta Gmail pessoal e confirme o aceite.\n` +
+    `3. Pronto! Seus 5TB e Gemini PRO estarão ativos por 18 meses!` +
+    `</blockquote>`;
+
+  const customInstructions = settingsRepo.get("post_delivery_text", defaultInstructions);
+
+  const successText =
+    `🎉 <b>COMPRA CONCLUÍDA VIA CARTEIRA!</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📦 <b>Produto:</b> Google 5TB - Gemini PRO 18 MESES\n` +
+    `🆔 <b>Pedido:</b> <code>${orderId}</code>\n\n` +
+    `🔑 <b>SEU LINK DE ATIVAÇÃO EXCLUSIVO:</b>\n` +
+    `<tg-spoiler>${link}</tg-spoiler>\n\n` +
+    `${customInstructions}\n\n` +
+    `💬 Precisa de ajuda? Nosso suporte está à disposição: @${config.supportUsername || "Admin"}`;
+
+  try {
+    await ctx.api.editMessageText(ctx.chat!.id, waitMsg.message_id, successText, {
+      parse_mode: "HTML",
+    });
+  } catch {
+    await ctx.reply(successText, { parse_mode: "HTML" });
+  }
+
+  // Notificação para o dono
+  const profit = config.salePriceBrl - 15.0;
+  try {
+    await ctx.api.sendMessage(
+      env.ADMIN_ID,
+      `🎉 <b>NOVA VENDA CONCLUÍDA (VIA SALDO DE CARTEIRA)!</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `👤 <b>Cliente:</b> @${ctx.from.username || ctx.from.first_name} (ID: <code>${ctx.from.id}</code>)\n` +
+        `💵 <b>Valor Debitado do Cliente:</b> <code>R$ ${config.salePriceBrl.toFixed(2)}</code>\n` +
+        `📉 <b>Custo API:</b> <code>R$ 15,00</code>\n` +
+        `💰 <b>SEU LUCRO LÍQUIDO: R$ ${profit.toFixed(2)}</b>\n` +
+        `🆔 <b>Pedido:</b> <code>${orderId}</code>\n\n` +
+        `🔑 <b>Entregue:</b>\n<code>${link}</code>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━`,
+      { parse_mode: "HTML" }
+    );
+  } catch {}
+}
+
+/**
+ * Executa o Checkout PIX Direto
+ */
+export async function executeDirectPixCheckout(ctx: Context) {
+  if (!ctx.from) return;
+
+  const config = settingsRepo.getConfig();
   const waitMsg = await ctx.reply("⏳ <i>Gerando seu QR Code PIX exclusivo...</i>", {
     parse_mode: "HTML",
   });
 
-  // 2. Pre-flight check: Verificar se a API tem saldo antes de cobrar o cliente
+  // Pre-flight check de saldo na API do fornecedor
   const client = new MasterApiClient(config.apiBaseUrl, config.resellerApiKey);
   const accountCheck = await client.getAccount();
 
   if (!accountCheck.ok || !accountCheck.user || accountCheck.user.balance_brl < 15.0) {
-    // Alerta o dono da loja imediatamente no privado
     try {
       await ctx.api.sendMessage(
         env.ADMIN_ID,
@@ -127,7 +457,6 @@ export async function handleBuyNow(ctx: Context) {
     );
   }
 
-  // 3. Cria a cobrança PIX no Mercado Pago do dono da loja
   const orderId = `ORD-${Date.now().toString(36).toUpperCase()}`;
   const mp = new MercadoPagoService(config.mpAccessToken);
 
@@ -148,7 +477,6 @@ export async function handleBuyNow(ctx: Context) {
 
   const payment = pixResult.payment;
 
-  // 4. Salva o pedido no SQLite local
   orderRepo.create({
     id: orderId,
     userId: ctx.from.id,
@@ -159,7 +487,6 @@ export async function handleBuyNow(ctx: Context) {
     costCents: 1500,
   });
 
-  // Apaga a mensagem de "gerando"
   try {
     await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id);
   } catch {}
@@ -181,7 +508,6 @@ export async function handleBuyNow(ctx: Context) {
     `<code>${payment.qrCode}</code>\n\n` +
     `⏳ <i>Aguardando confirmação do banco (expira em 15 minutos)...</i>`;
 
-  // 5. Envia com foto do QR Code se disponível, ou mensagem normal
   let sentMessageId: number;
   if (payment.qrCodeBuffer) {
     const photoMsg = await ctx.replyWithPhoto(new InputFile(payment.qrCodeBuffer, "pix-qrcode.png"), {
@@ -198,7 +524,6 @@ export async function handleBuyNow(ctx: Context) {
     sentMessageId = textMsg.message_id;
   }
 
-  // 6. Inicia o Polling automático de verificação a cada 3 segundos em background
   startPaymentPolling(ctx, orderId, payment.id, sentMessageId);
 }
 
@@ -210,11 +535,10 @@ function startPaymentPolling(ctx: Context, orderId: string, mpPaymentId: string,
   activePollingMap.add(orderId);
 
   const startTime = Date.now();
-  const maxDurationMs = 15 * 60 * 1000; // 15 minutos
+  const maxDurationMs = 15 * 60 * 1000;
   const intervalMs = 3500;
 
   const interval = setInterval(async () => {
-    // Se passou do tempo de expiração
     if (Date.now() - startTime > maxDurationMs) {
       clearInterval(interval);
       activePollingMap.delete(orderId);
@@ -248,13 +572,11 @@ async function processSuccessfulDelivery(
   const config = settingsRepo.getConfig();
   const client = new MasterApiClient(config.apiBaseUrl, config.resellerApiKey);
 
-  // 1. Emite o pedido na API mestra (com idempotência via external_id)
   const deliveryResult = await client.createOrder(mpPaymentId, "gemini-link-pro-18months");
 
   if (!deliveryResult.ok || !deliveryResult.order?.delivered_value) {
     orderRepo.markFailed(orderId, deliveryResult.error || "Erro de emissão");
 
-    // Alerta o dono da loja imediatamente
     try {
       await ctx.api.sendMessage(
         env.ADMIN_ID,
@@ -288,7 +610,6 @@ async function processSuccessfulDelivery(
 
   const customInstructions = settingsRepo.get("post_delivery_text", defaultInstructions);
 
-  // 2. Mensagem formatada com spoiler para o cliente
   const successText =
     `🎉 <b>PAGAMENTO CONFIRMADO COM SUCESSO!</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -303,7 +624,6 @@ async function processSuccessfulDelivery(
     await ctx.api.sendMessage(order.user_id, successText, { parse_mode: "HTML" });
   } catch {}
 
-  // 3. Notificação detalhada para o Dono da Loja
   const profit = config.salePriceBrl - 15.0;
   try {
     await ctx.api.sendMessage(
@@ -323,7 +643,7 @@ async function processSuccessfulDelivery(
 }
 
 /**
- * Trata o botão "Já paguei / Verificar"
+ * Trata o botão "Já paguei / Verificar" do PIX de Pedido
  */
 export async function handleCheckPix(ctx: Context, orderId: string) {
   const order = orderRepo.getById(orderId);
@@ -353,6 +673,36 @@ export async function handleCheckPix(ctx: Context, orderId: string) {
 }
 
 /**
+ * Trata o botão "Já paguei / Verificar" do PIX de Recarga
+ */
+export async function handleCheckDeposit(ctx: Context, depId: string) {
+  const dep = depositRepo.getById(depId);
+  if (!dep) return ctx.answerCallbackQuery({ text: "Recarga não encontrada." });
+
+  if (dep.status === "approved") {
+    return ctx.answerCallbackQuery({ text: "Esta recarga já foi creditada na sua carteira!" });
+  }
+
+  if (!dep.mp_payment_id) {
+    return ctx.answerCallbackQuery({ text: "Aguarde alguns segundos e tente novamente." });
+  }
+
+  const config = settingsRepo.getConfig();
+  const mp = new MercadoPagoService(config.mpAccessToken);
+  const status = await mp.getPaymentStatus(dep.mp_payment_id);
+
+  if (status.approved) {
+    await ctx.answerCallbackQuery({ text: "✅ Pagamento aprovado! Creditando saldo..." });
+    return processSuccessfulDeposit(ctx, depId);
+  }
+
+  return ctx.answerCallbackQuery({
+    text: "⏳ Pagamento ainda não detectado pelo banco. Conclua o PIX e aguarde alguns segundos!",
+    show_alert: true,
+  });
+}
+
+/**
  * Cancela um pedido de PIX pendente
  */
 export async function handleCancelPix(ctx: Context, orderId: string) {
@@ -361,6 +711,27 @@ export async function handleCancelPix(ctx: Context, orderId: string) {
     await ctx.deleteMessage();
   } catch {}
   return ctx.reply("❌ Pedido cancelado. Quando quiser comprar novamente, basta clicar no botão abaixo:", {
-    reply_markup: keyboards.customerMain(settingsRepo.getConfig().salePriceBrl, settingsRepo.getConfig().supportUsername),
+    reply_markup: keyboards.customerMain(
+      settingsRepo.getConfig().salePriceBrl,
+      settingsRepo.getConfig().supportUsername,
+      settingsRepo.getConfig().walletEnabled
+    ),
+  });
+}
+
+/**
+ * Cancela uma recarga de PIX pendente
+ */
+export async function handleCancelDeposit(ctx: Context, depId: string) {
+  activePollingMap.delete(depId);
+  try {
+    await ctx.deleteMessage();
+  } catch {}
+  return ctx.reply("❌ Recarga cancelada.", {
+    reply_markup: keyboards.customerMain(
+      settingsRepo.getConfig().salePriceBrl,
+      settingsRepo.getConfig().supportUsername,
+      settingsRepo.getConfig().walletEnabled
+    ),
   });
 }

@@ -4,12 +4,17 @@ export const keyboards = {
   /**
    * Menu principal da loja para clientes
    */
-  customerMain(priceBrl: number, supportUsername?: string): InlineKeyboard {
+  customerMain(priceBrl: number, supportUsername?: string, walletEnabled = true): InlineKeyboard {
     const kb = new InlineKeyboard();
     const formattedPrice = priceBrl.toFixed(2).replace(".", ",");
 
     // Botão de compra direta e chamativo
     kb.text(`⭐ Comprar Agora (R$ ${formattedPrice})`, "buy_now").row();
+
+    // Opção de Carteira (se ativada pelo dono)
+    if (walletEnabled) {
+      kb.text("💰 Minha Carteira & Saldo", "nav_wallet").row();
+    }
 
     // Botões de apoio
     if (supportUsername) {
@@ -23,13 +28,61 @@ export const keyboards = {
   },
 
   /**
-   * Tela de pagamento PIX com botão nativo de 1-toque para copiar
+   * Menu da Carteira do Cliente
+   */
+  walletMenu(balanceBrl: number): InlineKeyboard {
+    return new InlineKeyboard()
+      .text("➕ Recarregar R$ 15", "dep_qty_15")
+      .text("➕ Recarregar R$ 30", "dep_qty_30")
+      .row()
+      .text("➕ Recarregar R$ 50", "dep_qty_50")
+      .text("➕ Outro Valor", "dep_custom")
+      .row()
+      .text("↩️ Voltar para a Loja", "nav_home")
+      .row();
+  },
+
+  /**
+   * Escolha de pagamento na compra (Saldo ou PIX direto)
+   */
+  checkoutOptions(priceBrl: number, balanceBrl: number): InlineKeyboard {
+    const kb = new InlineKeyboard();
+    const priceFormatted = priceBrl.toFixed(2).replace(".", ",");
+
+    if (balanceBrl >= priceBrl) {
+      kb.text(`⚡ Comprar com Saldo da Carteira (1 Clique)`, "buy_wallet").row();
+    }
+
+    kb.text(`💳 Pagar via PIX Direto (R$ ${priceFormatted})`, "buy_pix_direct").row();
+    kb.text("↩️ Cancelar / Voltar", "nav_home").row();
+    return kb;
+  },
+
+  /**
+   * Tela de pagamento PIX de Recarga de Carteira
+   */
+  depositCheckout(pixCode: string, depositId: string): InlineKeyboard {
+    const kb = new InlineKeyboard();
+
+    if ((kb as any).copyText) {
+      (kb as any).copyText("📋 Copiar Código PIX", pixCode).row();
+    } else {
+      kb.text("📋 Copiar Código PIX", `copy_dep_${depositId}`).row();
+    }
+
+    kb.text("🔄 Já Paguei / Verificar", `check_dep_${depositId}`)
+      .text("❌ Cancelar Recarga", `cancel_dep_${depositId}`)
+      .row();
+
+    return kb;
+  },
+
+  /**
+   * Tela de pagamento PIX de Pedido com botão nativo de 1-toque para copiar
    */
   pixCheckout(pixCode: string, orderId: string): InlineKeyboard {
     const kb = new InlineKeyboard();
 
-    // Botão de copiar nativo do Telegram (copy_text)
-    // Se o cliente estiver num app recente, copia no clique. Senão, fallback de callback
     if ((kb as any).copyText) {
       (kb as any).copyText("📋 Copiar Código PIX", pixCode).row();
     } else {
@@ -46,7 +99,7 @@ export const keyboards = {
   /**
    * Painel de controle do Admin
    */
-  adminMenu(): InlineKeyboard {
+  adminMenu(walletEnabled = true): InlineKeyboard {
     return new InlineKeyboard()
       // Linha 1: Personalização básica
       .text("🏷️ Alterar Nome", "adm_set_name")
@@ -60,15 +113,16 @@ export const keyboards = {
       .text("📝 Textos da Loja", "adm_texts")
       .text("💬 @ do Suporte", "adm_set_support")
       .row()
-      // Linha 4: Diagnóstico e Simulação
+      // Linha 4: Modo Carteira
+      .text(walletEnabled ? "💰 Carteira: 🟢 Ativada" : "💰 Carteira: 🔴 Desativada", "adm_toggle_wallet")
       .text("🧪 Simular Entrega", "adm_simulate")
+      .row()
+      // Linha 5: Diagnóstico e Relatório
       .text("🩺 Diagnóstico", "adm_diag")
-      .row()
-      // Linha 5: Relatório e Broadcast
       .text("📊 Vendas & Lucro", "adm_stats")
-      .text("📢 Enviar Aviso", "adm_broadcast")
       .row()
-      // Linha 6: Prévia
+      // Linha 6: Broadcast e Visualização
+      .text("📢 Enviar Aviso", "adm_broadcast")
       .text("🏪 Ver Minha Loja (Cliente)", "adm_preview")
       .row();
   },

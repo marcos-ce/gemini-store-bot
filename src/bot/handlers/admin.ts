@@ -68,14 +68,14 @@ export async function showAdminPanel(ctx: Context, editMessage = false) {
     try {
       return await ctx.editMessageText(text, {
         parse_mode: "HTML",
-        reply_markup: keyboards.adminMenu(),
+        reply_markup: keyboards.adminMenu(config.walletEnabled),
       });
     } catch {}
   }
 
   return ctx.reply(text, {
     parse_mode: "HTML",
-    reply_markup: keyboards.adminMenu(),
+    reply_markup: keyboards.adminMenu(config.walletEnabled),
   });
 }
 
@@ -257,6 +257,13 @@ export async function handleAdminCallback(ctx: Context) {
     return showAdminPanel(ctx);
   }
 
+  if (data === "adm_toggle_wallet") {
+    const config = settingsRepo.getConfig();
+    const nextState = !config.walletEnabled;
+    settingsRepo.updateConfig({ walletEnabled: nextState });
+    return showAdminPanel(ctx, true);
+  }
+
   if (data === "adm_back_panel") {
     return showAdminPanel(ctx);
   }
@@ -267,7 +274,7 @@ export async function handleAdminCallback(ctx: Context) {
       `👁️ <b>Prévia da Loja (Visão do seu Cliente):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━`,
       {
         parse_mode: "HTML",
-        reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername),
+        reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
       }
     );
   }
@@ -497,6 +504,61 @@ export async function handleDiagnostics(ctx: Context) {
 
   return ctx.api.editMessageText(ctx.chat!.id, wait.message_id, diagText, {
     parse_mode: "HTML",
-    reply_markup: keyboards.adminMenu(),
+    reply_markup: keyboards.adminMenu(config.walletEnabled),
   });
+}
+
+/**
+ * Adiciona ou remove saldo manualmente de um cliente (/addsaldo, /remsaldo)
+ */
+export async function handleAdminAddSaldo(ctx: Context) {
+  if (!isAdmin(ctx)) return ctx.reply("⛔ Acesso não autorizado.");
+
+  const text = ctx.message?.text || "";
+  const parts = text.split(" ").filter(Boolean);
+
+  if (parts.length < 3) {
+    return ctx.reply(
+      "📌 <b>Uso do comando:</b>\n<code>/addsaldo [ID_USUARIO] [VALOR]</code>\n\n" +
+        "<i>Exemplo para adicionar:</i> <code>/addsaldo 123456789 25.00</code>\n" +
+        "<i>Exemplo para remover:</i> <code>/remsaldo 123456789 10.00</code>",
+      { parse_mode: "HTML" }
+    );
+  }
+
+  const targetId = parseInt(parts[1], 10);
+  const rawValue = parseFloat(parts[2].replace(",", "."));
+
+  if (isNaN(targetId) || isNaN(rawValue) || rawValue === 0) {
+    return ctx.reply("❌ ID de usuário ou valor inválido.");
+  }
+
+  const isRemoval = text.startsWith("/remsaldo") || rawValue < 0;
+  const absValue = Math.abs(rawValue);
+  const cents = Math.round(absValue * 100);
+
+  if (isRemoval) {
+    userRepo.debitBalance(targetId, cents);
+  } else {
+    userRepo.addBalance(targetId, cents);
+  }
+
+  const currentBal = (userRepo.getBalance(targetId) / 100).toFixed(2).replace(".", ",");
+  const actionLabel = isRemoval ? "removido" : "adicionado";
+
+  // Notifica o cliente se possível
+  try {
+    const notifyClientText = isRemoval
+      ? `ℹ️ <b>Seu saldo foi ajustado pelo administrador:</b> -R$ ${absValue.toFixed(2).replace(".", ",")}\n💳 Saldo Atual: <b>R$ ${currentBal}</b>`
+      : `🎉 <b>Você recebeu uma recarga de saldo do administrador:</b> +R$ ${absValue.toFixed(2).replace(".", ",")}\n💳 Saldo Atual: <b>R$ ${currentBal}</b>`;
+    await ctx.api.sendMessage(targetId, notifyClientText, { parse_mode: "HTML" });
+  } catch {}
+
+  return ctx.reply(
+    `✅ <b>Saldo ${actionLabel} com sucesso!</b>\n\n` +
+      `👤 <b>Usuário:</b> <code>${targetId}</code>\n` +
+      `💵 <b>Valor:</b> R$ ${absValue.toFixed(2).replace(".", ",")}\n` +
+      `💳 <b>Novo Saldo Atual:</b> R$ ${currentBal}`,
+    { parse_mode: "HTML" }
+  );
 }

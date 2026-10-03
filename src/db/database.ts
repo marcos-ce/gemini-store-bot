@@ -19,6 +19,7 @@ db.exec(`
     id INTEGER PRIMARY KEY,
     username TEXT,
     first_name TEXT,
+    balance_cents INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_seen TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -37,9 +38,25 @@ db.exec(`
     delivered_at TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS deposits (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    mp_payment_id TEXT UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_at TEXT
+  );
+
   CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
   CREATE INDEX IF NOT EXISTS idx_orders_mp ON orders(mp_payment_id);
+  CREATE INDEX IF NOT EXISTS idx_deposits_user ON deposits(user_id);
 `);
+
+// Migração segura para tabelas já existentes
+try {
+  db.exec("ALTER TABLE users ADD COLUMN balance_cents INTEGER NOT NULL DEFAULT 0;");
+} catch {}
 
 // ─── Interfaces ────────────────────────────────────────────────────────────
 export interface StoreConfig {
@@ -50,6 +67,7 @@ export interface StoreConfig {
   salePriceBrl: number;
   supportUsername: string;
   isConfigured: boolean;
+  walletEnabled: boolean;
   activePromptKey?: string; // Para fluxo de digitação no chat do Admin
 }
 
@@ -65,6 +83,16 @@ export interface OrderRecord {
   status: string;
   created_at: string;
   delivered_at: string | null;
+}
+
+export interface DepositRecord {
+  id: string;
+  user_id: number;
+  amount_cents: number;
+  mp_payment_id: string | null;
+  status: string;
+  created_at: string;
+  approved_at: string | null;
 }
 
 // ─── Repositório de Configurações ──────────────────────────────────────────
@@ -94,6 +122,7 @@ export const settingsRepo = {
     const salePriceStr = this.get("sale_price_brl", process.env.SALE_PRICE_BRL || "29.90");
     const supportUsername = this.get("support_username", process.env.SUPPORT_USERNAME || "");
     const isConfiguredVal = this.get("is_configured", "0");
+    const walletEnabledVal = this.get("wallet_enabled", "1");
     const activePromptKey = this.get("active_admin_prompt", "");
 
     const isConfigured = isConfiguredVal === "1" || (resellerApiKey.length > 5 && mpAccessToken.length > 5);
@@ -106,6 +135,7 @@ export const settingsRepo = {
       salePriceBrl: parseFloat(salePriceStr) || 29.90,
       supportUsername,
       isConfigured,
+      walletEnabled: walletEnabledVal === "1",
       activePromptKey: activePromptKey || undefined,
     };
   },
@@ -118,6 +148,7 @@ export const settingsRepo = {
     if (patch.salePriceBrl !== undefined) this.set("sale_price_brl", patch.salePriceBrl.toFixed(2));
     if (patch.supportUsername !== undefined) this.set("support_username", patch.supportUsername.replace(/^@/, ""));
     if (patch.isConfigured !== undefined) this.set("is_configured", patch.isConfigured ? "1" : "0");
+    if (patch.walletEnabled !== undefined) this.set("wallet_enabled", patch.walletEnabled ? "1" : "0");
     if (patch.activePromptKey !== undefined) {
       if (patch.activePromptKey) this.set("active_admin_prompt", patch.activePromptKey);
       else this.delete("active_admin_prompt");
@@ -138,13 +169,52 @@ export const userRepo = {
     `).run(id, username || null, firstName || null);
   },
 
-  getAll(): Array<{ id: number; username: string | null; first_name: string | null }> {
-    return db.prepare("SELECT id, username, first_name FROM users ORDER BY last_seen DESC").all() as any[];
+  getBalance(id: number): number {
+    const row = db.prepare("SELECT balance_cents FROM users WHERE id = ?").get(id) as { balance_cents: number } | undefined;
+    return row?.balance_cents || 0;
+  },
+
+  addBalance(id: number, amountCents: number): number {
+    db.prepare(`
+      INSERT INTO users (id, balance_cents, last_seen)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET balance_cents = balance_cents + ?
+    `).run(id, amountCents, amountCents);
+    return this.getBalance(id);
+  },
+
+  debitBalance(id: number, amountCents: number): boolean {
+    const current = this.getBalance(id);
+    if (current < amountCents) return false;
+    db.prepare("UPDATE users SET balance_cents = balance_cents - ? WHERE id = ?").run(amountCents, id);
+    return true;
+  },
+
+  getAll(): Array<{ id: number; username: string | null; first_name: string | null; balance_cents?: number }> {
+    return db.prepare("SELECT id, username, first_name, balance_cents FROM users ORDER BY last_seen DESC").all() as any[];
   },
 
   count(): number {
     const row = db.prepare("SELECT COUNT(*) as c FROM users").get() as { c: number };
     return row?.c || 0;
+  },
+};
+
+// ─── Repositório de Depósitos (Carteira) ───────────────────────────────────
+export const depositRepo = {
+  create(dep: { id: string; userId: number; amountCents: number; mpPaymentId?: string }): void {
+    db.prepare(`
+      INSERT INTO deposits (id, user_id, amount_cents, mp_payment_id, status)
+      VALUES (?, ?, ?, ?, 'pending')
+    `).run(dep.id, dep.userId, dep.amountCents, dep.mpPaymentId || null);
+  },
+
+  getById(id: string): DepositRecord | undefined {
+    return db.prepare("SELECT * FROM deposits WHERE id = ?").get(id) as unknown as DepositRecord | undefined;
+  },
+
+  markApproved(id: string): void {
+    db.prepare("UPDATE deposits SET status = 'approved', approved_at = datetime('now') WHERE id = ?").run(id);
   },
 };
 
@@ -174,11 +244,11 @@ export const orderRepo = {
   },
 
   getByMpPaymentId(mpPaymentId: string): OrderRecord | undefined {
-    return db.prepare("SELECT * FROM orders WHERE mp_payment_id = ?").get(mpPaymentId) as OrderRecord | undefined;
+    return db.prepare("SELECT * FROM orders WHERE mp_payment_id = ?").get(mpPaymentId) as unknown as OrderRecord | undefined;
   },
 
   getById(id: string): OrderRecord | undefined {
-    return db.prepare("SELECT * FROM orders WHERE id = ?").get(id) as OrderRecord | undefined;
+    return db.prepare("SELECT * FROM orders WHERE id = ?").get(id) as unknown as OrderRecord | undefined;
   },
 
   markDelivered(id: string, deliveredValue: string): void {
