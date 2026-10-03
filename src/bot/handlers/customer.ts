@@ -225,7 +225,9 @@ async function processSuccessfulDeposit(ctx: Context, depId: string) {
   const dep = depositRepo.getById(depId);
   if (!dep || dep.status === "approved") return;
 
-  depositRepo.markApproved(depId);
+  const wasMarked = depositRepo.markApproved(depId);
+  if (!wasMarked) return; // Já foi creditado por outro processo
+
   const newBalCents = userRepo.addBalance(dep.user_id, dep.amount_cents);
   const newBalBrl = (newBalCents / 100).toFixed(2).replace(".", ",");
   const depBrl = (dep.amount_cents / 100).toFixed(2).replace(".", ",");

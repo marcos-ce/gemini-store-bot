@@ -184,10 +184,11 @@ export const userRepo = {
   },
 
   debitBalance(id: number, amountCents: number): boolean {
-    const current = this.getBalance(id);
-    if (current < amountCents) return false;
-    db.prepare("UPDATE users SET balance_cents = balance_cents - ? WHERE id = ?").run(amountCents, id);
-    return true;
+    if (amountCents <= 0) return false;
+    const res = db.prepare(
+      "UPDATE users SET balance_cents = balance_cents - ? WHERE id = ? AND balance_cents >= ?"
+    ).run(amountCents, id, amountCents);
+    return Number(res.changes) > 0;
   },
 
   getAll(): Array<{ id: number; username: string | null; first_name: string | null; balance_cents?: number }> {
@@ -213,8 +214,11 @@ export const depositRepo = {
     return db.prepare("SELECT * FROM deposits WHERE id = ?").get(id) as unknown as DepositRecord | undefined;
   },
 
-  markApproved(id: string): void {
-    db.prepare("UPDATE deposits SET status = 'approved', approved_at = datetime('now') WHERE id = ?").run(id);
+  markApproved(id: string): boolean {
+    const res = db.prepare(
+      "UPDATE deposits SET status = 'approved', approved_at = datetime('now') WHERE id = ? AND status = 'pending'"
+    ).run(id);
+    return Number(res.changes) > 0;
   },
 };
 
