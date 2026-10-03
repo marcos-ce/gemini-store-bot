@@ -141,3 +141,36 @@ export class MasterApiClient {
     }
   }
 }
+
+let cachedCostData: { cost: number; updatedAt: number } | null = null;
+const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutos
+
+/**
+ * Consulta o custo unitário atual do produto na API mestra com cache em memória
+ */
+export async function fetchUpstreamProductCost(
+  client: MasterApiClient,
+  productSlug = "gemini-link-pro-18months"
+): Promise<{ ok: boolean; costBrl: number; error?: string }> {
+  const now = Date.now();
+  if (cachedCostData && now - cachedCostData.updatedAt < CACHE_TTL_MS) {
+    return { ok: true, costBrl: cachedCostData.cost };
+  }
+
+  const productsRes = await client.getProducts();
+  if (productsRes.ok && productsRes.products && productsRes.products.length > 0) {
+    const prod = productsRes.products.find((p) => p.slug === productSlug) || productsRes.products[0];
+    if (prod && typeof prod.price_brl === "number" && prod.price_brl > 0) {
+      cachedCostData = { cost: prod.price_brl, updatedAt: now };
+      return { ok: true, costBrl: prod.price_brl };
+    }
+  }
+
+  // Se a requisição falhar mas já tínhamos cache anterior, mantém o custo do cache
+  if (cachedCostData) {
+    return { ok: true, costBrl: cachedCostData.cost };
+  }
+
+  return { ok: false, costBrl: 15.0, error: productsRes.error || "Não foi possível obter preço atualizado da API." };
+}
+

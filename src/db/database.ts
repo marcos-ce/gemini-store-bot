@@ -69,6 +69,9 @@ export interface StoreConfig {
   isConfigured: boolean;
   walletEnabled: boolean;
   activePromptKey?: string; // Para fluxo de digitação no chat do Admin
+  pricingMode: "fixed" | "margin"; // "fixed" ou "margin"
+  profitMarginPercent: number; // Ex: 50 para 50% de margem
+  cachedApiCostBrl: number; // Último custo conhecido na API mestra (ex: 15.00)
 }
 
 export interface OrderRecord {
@@ -124,6 +127,14 @@ export const settingsRepo = {
     const isConfiguredVal = this.get("is_configured", "0");
     const walletEnabledVal = this.get("wallet_enabled", "1");
     const activePromptKey = this.get("active_admin_prompt", "");
+    const pricingModeVal = (this.get("pricing_mode", process.env.PRICING_MODE || "fixed") === "margin" ? "margin" : "fixed") as "fixed" | "margin";
+    const profitMarginPercent = parseFloat(this.get("profit_margin_percent", process.env.PROFIT_MARGIN_PERCENT || "50")) || 50;
+    const cachedApiCostBrl = parseFloat(this.get("cached_api_cost_brl", "15.00")) || 15.00;
+
+    let salePriceBrl = parseFloat(salePriceStr) || 29.90;
+    if (pricingModeVal === "margin") {
+      salePriceBrl = Number((cachedApiCostBrl * (1 + profitMarginPercent / 100)).toFixed(2));
+    }
 
     const isConfigured = isConfiguredVal === "1" || (resellerApiKey.length > 5 && mpAccessToken.length > 5);
 
@@ -132,11 +143,14 @@ export const settingsRepo = {
       resellerApiKey,
       apiBaseUrl,
       mpAccessToken,
-      salePriceBrl: parseFloat(salePriceStr) || 29.90,
+      salePriceBrl,
       supportUsername,
       isConfigured,
       walletEnabled: walletEnabledVal === "1",
       activePromptKey: activePromptKey || undefined,
+      pricingMode: pricingModeVal,
+      profitMarginPercent,
+      cachedApiCostBrl,
     };
   },
 
@@ -149,6 +163,9 @@ export const settingsRepo = {
     if (patch.supportUsername !== undefined) this.set("support_username", patch.supportUsername.replace(/^@/, ""));
     if (patch.isConfigured !== undefined) this.set("is_configured", patch.isConfigured ? "1" : "0");
     if (patch.walletEnabled !== undefined) this.set("wallet_enabled", patch.walletEnabled ? "1" : "0");
+    if (patch.pricingMode !== undefined) this.set("pricing_mode", patch.pricingMode);
+    if (patch.profitMarginPercent !== undefined) this.set("profit_margin_percent", patch.profitMarginPercent.toString());
+    if (patch.cachedApiCostBrl !== undefined) this.set("cached_api_cost_brl", patch.cachedApiCostBrl.toFixed(2));
     if (patch.activePromptKey !== undefined) {
       if (patch.activePromptKey) this.set("active_admin_prompt", patch.activePromptKey);
       else this.delete("active_admin_prompt");
@@ -264,12 +281,20 @@ export const orderRepo = {
     return db.prepare("SELECT * FROM orders WHERE id = ?").get(id) as unknown as OrderRecord | undefined;
   },
 
-  markDelivered(id: string, deliveredValue: string): void {
-    db.prepare(`
-      UPDATE orders 
-      SET status = 'delivered', delivered_value = ?, delivered_at = datetime('now')
-      WHERE id = ?
-    `).run(deliveredValue, id);
+  markDelivered(id: string, deliveredValue: string, actualCostCents?: number): void {
+    if (actualCostCents !== undefined && actualCostCents > 0) {
+      db.prepare(`
+        UPDATE orders 
+        SET status = 'delivered', delivered_value = ?, cost_cents = ?, delivered_at = datetime('now')
+        WHERE id = ?
+      `).run(deliveredValue, actualCostCents, id);
+    } else {
+      db.prepare(`
+        UPDATE orders 
+        SET status = 'delivered', delivered_value = ?, delivered_at = datetime('now')
+        WHERE id = ?
+      `).run(deliveredValue, id);
+    }
   },
 
   markFailed(id: string, reason: string): void {

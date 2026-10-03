@@ -3,6 +3,7 @@ import { env } from "../../config/env.js";
 import { settingsRepo, orderRepo, userRepo } from "../../db/database.js";
 import { MasterApiClient } from "../../services/apiClient.js";
 import { MercadoPagoService } from "../../services/mercadopago.js";
+import { calculateEffectivePrice } from "../../services/pricing.js";
 import { keyboards } from "../keyboards.js";
 
 let lastAdminPanelMessageId: number | null = null;
@@ -32,6 +33,7 @@ export async function showAdminPanel(ctx: Context, editMessage = false, targetMs
 
   const config = settingsRepo.getConfig();
   const stats = orderRepo.getStats();
+  const priceInfo = await calculateEffectivePrice();
 
   // Consulta saldo atual na API do fornecedor
   let apiStatus = "⚪ Não configurada";
@@ -59,14 +61,28 @@ export async function showAdminPanel(ctx: Context, editMessage = false, targetMs
     }
   }
 
-  const profitPerSale = config.salePriceBrl - 15.0;
+  const pricingBadge =
+    config.pricingMode === "margin"
+      ? `📈 Margem Dinâmica (+${config.profitMarginPercent}%)`
+      : `🏷️ Preço Fixo`;
+
+  const profitDisplay = priceInfo.isLoss
+    ? `⚠️ <b>PREÇO NO PREJUÍZO (VENDAS PAUSADAS)</b>`
+    : `Lucro: <b>R$ ${priceInfo.profitBrl.toFixed(2)}/un</b> (${priceInfo.marginPercent > 0 ? "+" : ""}${priceInfo.marginPercent}%)`;
+
+  const pricingBtnLabel =
+    config.pricingMode === "margin"
+      ? `📈 Preço: +${config.profitMarginPercent}%`
+      : `💵 Preço: R$ ${priceInfo.salePriceBrl.toFixed(2)}`;
 
   const text =
     `🛡️ <b>PAINEL DE CONTROLE — DONO DA LOJA</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `🏪 <b>Nome da Loja:</b> ${config.storeName}\n` +
     `⭐ <b>Produto:</b> Google 5TB - Gemini PRO 18 MESES\n` +
-    `💵 <b>Preço de Venda:</b> R$ ${config.salePriceBrl.toFixed(2)} <i>(Lucro: R$ ${profitPerSale.toFixed(2)}/un)</i>\n` +
+    `💵 <b>Preço de Venda:</b> R$ ${priceInfo.salePriceBrl.toFixed(2)} <i>[${pricingBadge}]</i>\n` +
+    `📉 <b>Custo do Fornecedor:</b> R$ ${priceInfo.apiCostBrl.toFixed(2)}\n` +
+    `💰 <b>Margem por Venda:</b> ${profitDisplay}\n` +
     `💬 <b>Suporte:</b> @${config.supportUsername || "Não configurado"}\n\n` +
     `💳 <b>Mercado Pago:</b> ${mpStatus}\n` +
     `🔑 <b>API Fornecedor:</b> ${apiStatus} · Saldo: <b>${apiBalanceText}</b>\n\n` +
@@ -84,7 +100,7 @@ export async function showAdminPanel(ctx: Context, editMessage = false, targetMs
     try {
       await ctx.api.editMessageText(ctx.chat!.id, msgIdToEdit, text, {
         parse_mode: "HTML",
-        reply_markup: keyboards.adminMenu(config.walletEnabled),
+        reply_markup: keyboards.adminMenu(config.walletEnabled, pricingBtnLabel),
       });
       lastAdminPanelMessageId = msgIdToEdit;
       return;
@@ -113,7 +129,7 @@ export async function showAdminPanel(ctx: Context, editMessage = false, targetMs
 
   const sent = await ctx.reply(text, {
     parse_mode: "HTML",
-    reply_markup: keyboards.adminMenu(config.walletEnabled),
+    reply_markup: keyboards.adminMenu(config.walletEnabled, pricingBtnLabel),
   });
   lastAdminPanelMessageId = sent.message_id;
 }
@@ -141,12 +157,92 @@ export async function handleAdminCallback(ctx: Context) {
     );
   }
 
-  if (data === "adm_set_price") {
-    settingsRepo.updateConfig({ activePromptKey: "set_price" });
+  if (data === "adm_price_menu" || data === "adm_set_price") {
+    settingsRepo.updateConfig({ activePromptKey: "" });
+    const config = settingsRepo.getConfig();
+    const priceInfo = await calculateEffectivePrice();
+
+    const modeText =
+      config.pricingMode === "margin"
+        ? `📈 <b>Margem de Lucro Automática (+${config.profitMarginPercent}%)</b>`
+        : `🏷️ <b>Preço Fixo em Reais</b>`;
+
+    const statusNotice = priceInfo.isLoss
+      ? `\n🚨 <b>ATENÇÃO: PREÇO NO PREJUÍZO!</b> As vendas estão pausadas até você reajustar.`
+      : "";
+
     return ctx.editMessageText(
-      "💵 <b>ALTERAR PREÇO DE VENDA</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
-        "Digite o novo preço de venda em Reais:\n<i>(Exemplo: 29.90 ou 35.00 — Custo API: R$ 15,00)</i>",
-      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt() }
+      `💵 <b>CONFIGURAÇÃO DE PREÇO & MARGEM DE LUCRO</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `• <b>Custo na API Mestra:</b> R$ ${priceInfo.apiCostBrl.toFixed(2)}\n` +
+        `• <b>Modo Atual:</b> ${modeText}\n` +
+        `• <b>Preço de Venda Efetivo:</b> R$ ${priceInfo.salePriceBrl.toFixed(2)}\n` +
+        `• <b>Seu Lucro Líquido:</b> R$ ${priceInfo.profitBrl.toFixed(2)}/unidade\n` +
+        statusNotice +
+        `\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Escolha como deseja definir o preço dos seus produtos:`,
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboards.priceConfigMenu(config.pricingMode === "margin"),
+      }
+    );
+  }
+
+  if (data === "adm_mode_margin") {
+    const config = settingsRepo.getConfig();
+    const priceInfo = await calculateEffectivePrice();
+    return ctx.editMessageText(
+      `📈 <b>MODO MARGEM DE LUCRO AUTOMÁTICA (%)</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Custo atual do fornecedor: <b>R$ ${priceInfo.apiCostBrl.toFixed(2)}</b>\n\n` +
+        `💡 <b>Como funciona:</b> O bot calcula o preço de venda adicionando sua margem sobre o custo da API.\n` +
+        `<b>Se o custo da API subir, seu preço de venda sobe sozinho na mesma proporção!</b> Você nunca toma prejuízo.\n\n` +
+        `Escolha a margem desejada abaixo:`,
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboards.marginSelectMenu(priceInfo.apiCostBrl, config.profitMarginPercent),
+      }
+    );
+  }
+
+  if (data === "adm_mode_fixed") {
+    settingsRepo.updateConfig({ activePromptKey: "set_price" });
+    const priceInfo = await calculateEffectivePrice();
+    return ctx.editMessageText(
+      `🏷️ <b>MODO PREÇO FIXO EM REAIS</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Custo atual do fornecedor: <b>R$ ${priceInfo.apiCostBrl.toFixed(2)}</b>\n\n` +
+        `Digite o valor fixo em Reais que deseja cobrar:\n` +
+        `<i>(Mínimo recomendado: R$ ${(priceInfo.apiCostBrl + 1.0).toFixed(2)} — Exemplo: <code>29.90</code> ou <code>35.00</code>)</i>`,
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt("adm_price_menu") }
+    );
+  }
+
+  if (data.startsWith("adm_margin_") && data !== "adm_margin_custom") {
+    const margin = parseInt(data.replace("adm_margin_", ""), 10);
+    if (!isNaN(margin) && margin > 0) {
+      settingsRepo.updateConfig({
+        pricingMode: "margin",
+        profitMarginPercent: margin,
+        activePromptKey: "",
+      });
+      await ctx.answerCallbackQuery({
+        text: `✅ Margem de lucro definida para +${margin}%!`,
+      });
+      return showAdminPanel(ctx, true);
+    }
+  }
+
+  if (data === "adm_margin_custom") {
+    settingsRepo.updateConfig({ activePromptKey: "set_margin_custom" });
+    const priceInfo = await calculateEffectivePrice();
+    return ctx.editMessageText(
+      `✏️ <b>MARGEM DE LUCRO PERSONALIZADA</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Custo atual do fornecedor: <b>R$ ${priceInfo.apiCostBrl.toFixed(2)}</b>\n\n` +
+        `Digite a porcentagem de lucro desejada:\n` +
+        `<i>(Exemplo: envie <code>60</code> para +60% ou <code>120</code> para +120%)</i>`,
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt("adm_mode_margin") }
     );
   }
 
@@ -337,13 +433,35 @@ export async function handleAdminPrompt(ctx: Context, promptKey: string, text: s
   }
 
   if (promptKey === "set_price") {
+    const priceInfo = await calculateEffectivePrice();
     const val = parseFloat(clean.replace(",", "."));
-    if (isNaN(val) || val < 15.0) {
+    if (isNaN(val) || val <= priceInfo.apiCostBrl) {
       return showPromptError(
-        "❌ <b>Preço inválido!</b> O valor de venda deve ser no mínimo R$ 15,00 (preço de custo de fábrica)."
+        `❌ <b>Preço inválido ou no prejuízo!</b>\n` +
+          `O custo atual na API do fornecedor é de <b>R$ ${priceInfo.apiCostBrl.toFixed(2)}</b>.\n` +
+          `Defina um valor superior para garantir sua margem de lucro.`
       );
     }
-    settingsRepo.updateConfig({ salePriceBrl: val, activePromptKey: "" });
+    settingsRepo.updateConfig({
+      pricingMode: "fixed",
+      salePriceBrl: val,
+      activePromptKey: "",
+    });
+    return showAdminPanel(ctx, true, targetId || undefined);
+  }
+
+  if (promptKey === "set_margin_custom") {
+    const val = parseFloat(clean.replace(",", ".").replace("%", ""));
+    if (isNaN(val) || val < 5 || val > 1000) {
+      return showPromptError(
+        "❌ <b>Porcentagem inválida!</b> Digite um valor numérico entre 5% e 1000% (ex: <code>60</code>)."
+      );
+    }
+    settingsRepo.updateConfig({
+      pricingMode: "margin",
+      profitMarginPercent: Math.round(val),
+      activePromptKey: "",
+    });
     return showAdminPanel(ctx, true, targetId || undefined);
   }
 

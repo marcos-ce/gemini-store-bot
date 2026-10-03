@@ -128,11 +128,11 @@ export const keyboards = {
   /**
    * Painel de controle do Admin
    */
-  adminMenu(walletEnabled = true): InlineKeyboard {
+  adminMenu(walletEnabled = true, pricingLabel = "💵 Preço & Lucro"): InlineKeyboard {
     return new InlineKeyboard()
       // Linha 1: Personalização básica
       .text("🏷️ Alterar Nome", "adm_set_name")
-      .text("💵 Alterar Preço", "adm_set_price")
+      .text(pricingLabel, "adm_price_menu")
       .row()
       // Linha 2: Conexões de pagamento e API
       .text("💳 Token Mercado Pago", "adm_set_mp")
@@ -157,6 +157,41 @@ export const keyboards = {
       // Linha 7: Visualização
       .text("🏪 Ver Minha Loja (Cliente)", "adm_preview")
       .row();
+  },
+
+  /**
+   * Menu de escolha de modelo de precificação
+   */
+  priceConfigMenu(isMarginMode: boolean): InlineKeyboard {
+    return new InlineKeyboard()
+      .text(
+        isMarginMode ? "✅ Margem de Lucro % (Ativa)" : "📈 Ativar Margem de Lucro %",
+        "adm_mode_margin"
+      )
+      .row()
+      .text(
+        !isMarginMode ? "✅ Preço Fixo R$ (Ativo)" : "🏷️ Ativar Preço Fixo R$",
+        "adm_mode_fixed"
+      )
+      .row()
+      .text("↩️ Voltar ao Painel", "adm_back_panel");
+  },
+
+  /**
+   * Menu de seleção rápida de porcentagem de margem
+   */
+  marginSelectMenu(apiCostBrl: number, currentMargin = 50): InlineKeyboard {
+    const calc = (pct: number) => (apiCostBrl * (1 + pct / 100)).toFixed(2).replace(".", ",");
+    return new InlineKeyboard()
+      .text(`${currentMargin === 30 ? "✅ " : ""}+30% (R$ ${calc(30)})`, "adm_margin_30")
+      .text(`${currentMargin === 50 ? "✅ " : ""}+50% (R$ ${calc(50)})`, "adm_margin_50")
+      .row()
+      .text(`${currentMargin === 75 ? "✅ " : ""}+75% (R$ ${calc(75)})`, "adm_margin_75")
+      .text(`${currentMargin === 100 ? "✅ " : ""}+100% (R$ ${calc(100)})`, "adm_margin_100")
+      .row()
+      .text("✏️ Outra Porcentagem Customizada", "adm_margin_custom")
+      .row()
+      .text("↩️ Voltar ao Menu de Preço", "adm_price_menu");
   },
 
   /**

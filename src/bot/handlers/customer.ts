@@ -3,6 +3,7 @@ import { env } from "../../config/env.js";
 import { settingsRepo, orderRepo, userRepo, depositRepo } from "../../db/database.js";
 import { MasterApiClient } from "../../services/apiClient.js";
 import { MercadoPagoService } from "../../services/mercadopago.js";
+import { calculateEffectivePrice } from "../../services/pricing.js";
 import { keyboards } from "../keyboards.js";
 import { startWizard } from "./wizard.js";
 
@@ -63,7 +64,8 @@ export async function handleCustomerStart(ctx: Context) {
     return startWizard(ctx);
   }
 
-  const priceFormatted = config.salePriceBrl.toFixed(2).replace(".", ",");
+  const priceInfo = await calculateEffectivePrice();
+  const priceFormatted = priceInfo.salePriceBrl.toFixed(2).replace(".", ",");
 
   const defaultDesc =
     `<blockquote>` +
@@ -88,7 +90,7 @@ export async function handleCustomerStart(ctx: Context) {
 
   return editOrReply(ctx, welcomeText, {
     parse_mode: "HTML",
-    reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+    reply_markup: keyboards.customerMain(priceInfo.salePriceBrl, config.supportUsername, config.walletEnabled),
   });
 }
 
@@ -339,13 +341,39 @@ export async function handleBuyNow(ctx: Context) {
     return ctx.reply("⚠️ Loja em rápida manutenção. Por favor, tente novamente em instantes.");
   }
 
-  // 2. Se a carteira estiver ativa e o cliente tiver saldo, oferece escolha
+  const priceInfo = await calculateEffectivePrice();
+
+  // 2. Trava Anti-Prejuízo Automática (Circuit Breaker)
+  if (priceInfo.isLoss) {
+    try {
+      await ctx.api.sendMessage(
+        env.ADMIN_ID,
+        `🚨 <b>TRAVA ANTI-PREJUÍZO ATIVADA!</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `Um cliente tentou comprar, mas a venda foi <b>pausada automaticamente</b> para evitar prejuízo!\n\n` +
+          `• Custo atual na API do fornecedor: <b>R$ ${priceInfo.apiCostBrl.toFixed(2)}</b>\n` +
+          `• Preço configurado para venda: <b>R$ ${priceInfo.salePriceBrl.toFixed(2)}</b>\n\n` +
+          `👉 Acesse o <code>/admin</code> > <b>Preço & Lucro</b> para ajustar seu preço ou ativar o <b>Modo Margem % Automático</b>.`,
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+
+    return ctx.reply(
+      "⚠️ <b>Produto em atualização momentânea de catálogo.</b>\n\n" +
+        `Nossa equipe está ajustando os detalhes deste produto. Fale com nosso atendimento: @${config.supportUsername || "Admin"}`,
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboards.customerMain(priceInfo.salePriceBrl, config.supportUsername, config.walletEnabled),
+      }
+    );
+  }
+
+  // 3. Se a carteira estiver ativa e o cliente tiver saldo, oferece escolha
   if (config.walletEnabled) {
     const balCents = userRepo.getBalance(ctx.from.id);
     const balBrl = balCents / 100;
 
-    if (balBrl >= config.salePriceBrl) {
-      const priceFormatted = config.salePriceBrl.toFixed(2).replace(".", ",");
+    if (balBrl >= priceInfo.salePriceBrl) {
+      const priceFormatted = priceInfo.salePriceBrl.toFixed(2).replace(".", ",");
       const balFormatted = balBrl.toFixed(2).replace(".", ",");
 
       return editOrReply(
@@ -358,7 +386,7 @@ export async function handleBuyNow(ctx: Context) {
           `Escolha a forma de pagamento:`,
         {
           parse_mode: "HTML",
-          reply_markup: keyboards.checkoutOptions(config.salePriceBrl, balBrl),
+          reply_markup: keyboards.checkoutOptions(priceInfo.salePriceBrl, balBrl),
         }
       );
     }
@@ -375,7 +403,14 @@ export async function handleBuyWithWallet(ctx: Context) {
   if (!ctx.from) return;
 
   const config = settingsRepo.getConfig();
-  const priceCents = Math.round(config.salePriceBrl * 100);
+  const priceInfo = await calculateEffectivePrice();
+
+  if (priceInfo.isLoss) {
+    return ctx.reply("⚠️ Produto em rápida atualização de catálogo. Tente novamente em instantes.");
+  }
+
+  const priceCents = Math.round(priceInfo.salePriceBrl * 100);
+  const costCents = Math.round(priceInfo.apiCostBrl * 100);
 
   // 1. Débito atômico na carteira local
   const debited = userRepo.debitBalance(ctx.from.id, priceCents);
@@ -414,7 +449,7 @@ export async function handleBuyWithWallet(ctx: Context) {
     userName: ctx.from.username || ctx.from.first_name,
     productName: "Google 5TB - Gemini PRO 18 MESES",
     priceCents,
-    costCents: 1500,
+    costCents,
   });
 
   const client = new MasterApiClient(config.apiBaseUrl, config.resellerApiKey);
@@ -434,7 +469,7 @@ export async function handleBuyWithWallet(ctx: Context) {
           `Erro: ${deliveryResult.error || "Tente novamente em instantes."}`,
         {
           parse_mode: "HTML",
-          reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+          reply_markup: keyboards.customerMain(priceInfo.salePriceBrl, config.supportUsername, config.walletEnabled),
         }
       );
     } catch {}
@@ -452,7 +487,10 @@ export async function handleBuyWithWallet(ctx: Context) {
   }
 
   const link = deliveryResult.order.delivered_value;
-  orderRepo.markDelivered(orderId, link);
+  const actualCost = deliveryResult.order?.price_brl
+    ? Math.round(deliveryResult.order.price_brl * 100)
+    : costCents;
+  orderRepo.markDelivered(orderId, link, actualCost);
 
   const defaultInstructions =
     `<blockquote>` +
@@ -477,25 +515,25 @@ export async function handleBuyWithWallet(ctx: Context) {
   try {
     await ctx.api.editMessageText(ctx.chat!.id, targetMsgId, successText, {
       parse_mode: "HTML",
-      reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+      reply_markup: keyboards.customerMain(priceInfo.salePriceBrl, config.supportUsername, config.walletEnabled),
     });
   } catch {
     await ctx.reply(successText, {
       parse_mode: "HTML",
-      reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+      reply_markup: keyboards.customerMain(priceInfo.salePriceBrl, config.supportUsername, config.walletEnabled),
     });
   }
 
   // Notificação para o dono
-  const profit = config.salePriceBrl - 15.0;
+  const profit = priceInfo.salePriceBrl - actualCost / 100;
   try {
     await ctx.api.sendMessage(
       env.ADMIN_ID,
       `🎉 <b>NOVA VENDA CONCLUÍDA (VIA SALDO DE CARTEIRA)!</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `👤 <b>Cliente:</b> @${ctx.from.username || ctx.from.first_name} (ID: <code>${ctx.from.id}</code>)\n` +
-        `💵 <b>Valor Debitado do Cliente:</b> <code>R$ ${config.salePriceBrl.toFixed(2)}</code>\n` +
-        `📉 <b>Custo API:</b> <code>R$ 15,00</code>\n` +
+        `💵 <b>Valor Debitado do Cliente:</b> <code>R$ ${priceInfo.salePriceBrl.toFixed(2)}</code>\n` +
+        `📉 <b>Custo Real da API:</b> <code>R$ ${(actualCost / 100).toFixed(2)}</code>\n` +
         `💰 <b>SEU LUCRO LÍQUIDO: R$ ${profit.toFixed(2)}</b>\n` +
         `🆔 <b>Pedido:</b> <code>${orderId}</code>\n\n` +
         `🔑 <b>Entregue:</b>\n<code>${link}</code>\n` +
@@ -512,6 +550,27 @@ export async function executeDirectPixCheckout(ctx: Context) {
   if (!ctx.from) return;
 
   const config = settingsRepo.getConfig();
+  const priceInfo = await calculateEffectivePrice();
+
+  // Trava Anti-Prejuízo
+  if (priceInfo.isLoss) {
+    try {
+      await ctx.api.sendMessage(
+        env.ADMIN_ID,
+        `🚨 <b>TRAVA ANTI-PREJUÍZO ATIVADA!</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `Tentativa de compra via PIX bloqueada porque o custo da API (R$ ${priceInfo.apiCostBrl.toFixed(2)}) é maior ou igual ao preço de venda (R$ ${priceInfo.salePriceBrl.toFixed(2)}).\n` +
+          `👉 Ajuste o preço no <code>/admin</code>.`,
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+
+    return ctx.reply(
+      "⚠️ <b>Produto em atualização momentânea de catálogo.</b> Tente novamente em instantes.",
+      {
+        reply_markup: keyboards.customerMain(priceInfo.salePriceBrl, config.supportUsername, config.walletEnabled),
+      }
+    );
+  }
 
   // Apaga menu anterior para exibir apenas a tela de pagamento limpa
   if (ctx.callbackQuery?.message) {
@@ -524,16 +583,16 @@ export async function executeDirectPixCheckout(ctx: Context) {
     parse_mode: "HTML",
   });
 
-  // Pre-flight check de saldo na API do fornecedor
+  // Pre-flight check dinâmico de saldo na API do fornecedor
   const client = new MasterApiClient(config.apiBaseUrl, config.resellerApiKey);
   const accountCheck = await client.getAccount();
 
-  if (!accountCheck.ok || !accountCheck.user || accountCheck.user.balance_brl < 15.0) {
+  if (!accountCheck.ok || !accountCheck.user || accountCheck.user.balance_brl < priceInfo.apiCostBrl) {
     try {
       await ctx.api.sendMessage(
         env.ADMIN_ID,
         `⚠️ <b>ALERTA DE VENDAS — CARTEIRA SEM SALDO!</b>\n\n` +
-          `O cliente @${ctx.from.username || ctx.from.first_name} tentou comprar, mas sua carteira de API está sem saldo (Saldo atual: R$ ${accountCheck.user?.balance_brl.toFixed(2) || "0,00"}).\n\n` +
+          `O cliente @${ctx.from.username || ctx.from.first_name} tentou comprar, mas sua carteira de API está sem saldo (Saldo atual: R$ ${accountCheck.user?.balance_brl.toFixed(2) || "0,00"} — Custo necessário: R$ ${priceInfo.apiCostBrl.toFixed(2)}).\n\n` +
           `👉 <i>Recarregue sua carteira de revenda agora para não perder essa venda!</i>`,
         { parse_mode: "HTML" }
       );
@@ -546,7 +605,7 @@ export async function executeDirectPixCheckout(ctx: Context) {
         "Nossa equipe já foi notificada e em poucos instantes o estoque estará renovado. Tente novamente em alguns minutos!",
       {
         parse_mode: "HTML",
-        reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+        reply_markup: keyboards.customerMain(priceInfo.salePriceBrl, config.supportUsername, config.walletEnabled),
       }
     );
   }
@@ -555,7 +614,7 @@ export async function executeDirectPixCheckout(ctx: Context) {
   const mp = new MercadoPagoService(config.mpAccessToken);
 
   const pixResult = await mp.createPix({
-    amountBrl: config.salePriceBrl,
+    amountBrl: priceInfo.salePriceBrl,
     description: `${config.storeName} - Gemini Pro 18M`,
     externalReference: orderId,
     payerEmail: `cliente_${ctx.from.id}@gmail.com`,
@@ -567,7 +626,7 @@ export async function executeDirectPixCheckout(ctx: Context) {
       waitMsg.message_id,
       `❌ Falha ao emitir PIX: ${pixResult.error || "Tente novamente mais tarde."}`,
       {
-        reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+        reply_markup: keyboards.customerMain(priceInfo.salePriceBrl, config.supportUsername, config.walletEnabled),
       }
     );
   }
@@ -580,15 +639,15 @@ export async function executeDirectPixCheckout(ctx: Context) {
     userName: ctx.from.username || ctx.from.first_name,
     mpPaymentId: payment.id,
     productName: "Google 5TB - Gemini PRO 18 MESES",
-    priceCents: Math.round(config.salePriceBrl * 100),
-    costCents: 1500,
+    priceCents: Math.round(priceInfo.salePriceBrl * 100),
+    costCents: Math.round(priceInfo.apiCostBrl * 100),
   });
 
   try {
     await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id);
   } catch {}
 
-  const formattedPrice = config.salePriceBrl.toFixed(2).replace(".", ",");
+  const formattedPrice = priceInfo.salePriceBrl.toFixed(2).replace(".", ",");
   const captionText =
     `💳 <b>PAGAMENTO PIX — ENTREGA AUTOMÁTICA</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -704,7 +763,10 @@ export async function processSuccessfulDelivery(
   }
 
   const link = deliveryResult.order.delivered_value;
-  orderRepo.markDelivered(orderId, link);
+  const actualCostCents = deliveryResult.order?.price_brl
+    ? Math.round(deliveryResult.order.price_brl * 100)
+    : order.cost_cents;
+  orderRepo.markDelivered(orderId, link, actualCostCents);
 
   const defaultInstructions =
     `<blockquote>` +
@@ -733,22 +795,25 @@ export async function processSuccessfulDelivery(
     } catch {}
   }
 
+  const salePriceBrl = order.price_cents / 100;
+  const costBrl = actualCostCents / 100;
+  const profit = salePriceBrl - costBrl;
+
   try {
     await botApi.sendMessage(order.user_id, successText, {
       parse_mode: "HTML",
-      reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+      reply_markup: keyboards.customerMain(salePriceBrl, config.supportUsername, config.walletEnabled),
     });
   } catch {}
 
-  const profit = config.salePriceBrl - 15.0;
   try {
     await botApi.sendMessage(
       env.ADMIN_ID,
       `🎉 <b>NOVA VENDA CONCLUÍDA NO SEU BOT!</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `👤 <b>Cliente:</b> @${order.user_name || "Cliente"} (ID: <code>${order.user_id}</code>)\n` +
-        `💵 <b>Recebido no Mercado Pago:</b> <code>R$ ${config.salePriceBrl.toFixed(2)}</code>\n` +
-        `📉 <b>Custo API:</b> <code>R$ 15,00</code>\n` +
+        `💵 <b>Recebido no Mercado Pago:</b> <code>R$ ${salePriceBrl.toFixed(2)}</code>\n` +
+        `📉 <b>Custo Real da API:</b> <code>R$ ${costBrl.toFixed(2)}</code>\n` +
         `💰 <b>SEU LUCRO LÍQUIDO: R$ ${profit.toFixed(2)}</b>\n` +
         `🆔 <b>Pedido:</b> <code>${orderId}</code>\n\n` +
         `🔑 <b>Entregue:</b>\n<code>${link}</code>\n` +
