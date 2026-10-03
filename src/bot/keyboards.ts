@@ -56,17 +56,35 @@ export const keyboards = {
       .text("💳 Token Mercado Pago", "adm_set_mp")
       .text("🔑 Chave da API", "adm_set_api")
       .row()
-      // Linha 3: Suporte e Teste
+      // Linha 3: Textos e Suporte
+      .text("📝 Textos da Loja", "adm_texts")
       .text("💬 @ do Suporte", "adm_set_support")
+      .row()
+      // Linha 4: Diagnóstico e Simulação
       .text("🧪 Simular Entrega", "adm_simulate")
-      .row()
-      // Linha 4: Diagnóstico e Relatório
       .text("🩺 Diagnóstico", "adm_diag")
-      .text("📊 Vendas & Lucro", "adm_stats")
       .row()
-      // Linha 5: Broadcast e Visualização
+      // Linha 5: Relatório e Broadcast
+      .text("📊 Vendas & Lucro", "adm_stats")
       .text("📢 Enviar Aviso", "adm_broadcast")
-      .text("🏪 Ver Minha Loja", "adm_preview")
+      .row()
+      // Linha 6: Prévia
+      .text("🏪 Ver Minha Loja (Cliente)", "adm_preview")
+      .row();
+  },
+
+  /**
+   * Menu de personalização de textos da loja
+   */
+  messagesMenu(): InlineKeyboard {
+    return new InlineKeyboard()
+      .text("✏️ Descrição do Produto", "adm_set_desc")
+      .text("✏️ Dúvidas & Regras (FAQ)", "adm_set_faq")
+      .row()
+      .text("✏️ Mensagem Pós-Entrega", "adm_set_delivery")
+      .text("🔄 Restaurar Padrões", "adm_reset_texts")
+      .row()
+      .text("↩️ Voltar ao Painel", "adm_back_panel")
       .row();
   },
 

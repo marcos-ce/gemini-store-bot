@@ -199,6 +199,68 @@ export async function handleAdminCallback(ctx: Context) {
     );
   }
 
+  if (data === "adm_texts") {
+    return ctx.reply(
+      `📝 <b>PERSONALIZAÇÃO DE TEXTOS DA LOJA</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Escolha qual mensagem você deseja personalizar:\n\n` +
+        `• <b>Descrição do Produto:</b> Exibida no menu inicial do /start\n` +
+        `• <b>Dúvidas & Regras (FAQ):</b> Exibida no botão 'Como Funciona'\n` +
+        `• <b>Instruções Pós-Entrega:</b> Enviada junto com o link após a aprovação do PIX`,
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboards.messagesMenu(),
+      }
+    );
+  }
+
+  if (data === "adm_set_desc") {
+    settingsRepo.updateConfig({ activePromptKey: "set_desc" });
+    const current = settingsRepo.get("product_description", "<i>(Padrão de fábrica ativo)</i>");
+    return ctx.reply(
+      `✏️ <b>ALTERAR DESCRIÇÃO DO PRODUTO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Envie agora o texto que deseja exibir na tela principal do /start.\n` +
+        `<i>(Suporta emojis e formatação HTML: &lt;b&gt;, &lt;i&gt;, &lt;blockquote&gt;)</i>\n\n` +
+        `<b>Texto atual:</b>\n${current}`,
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt() }
+    );
+  }
+
+  if (data === "adm_set_faq") {
+    settingsRepo.updateConfig({ activePromptKey: "set_faq" });
+    const current = settingsRepo.get("faq_text", "<i>(Padrão de fábrica ativo)</i>");
+    return ctx.reply(
+      `✏️ <b>ALTERAR DÚVIDAS & REGRAS (FAQ)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Envie o texto que será exibido quando o cliente clicar em 'Como Funciona':\n\n` +
+        `<b>Texto atual:</b>\n${current}`,
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt() }
+    );
+  }
+
+  if (data === "adm_set_delivery") {
+    settingsRepo.updateConfig({ activePromptKey: "set_delivery" });
+    const current = settingsRepo.get("post_delivery_text", "<i>(Padrão de fábrica ativo)</i>");
+    return ctx.reply(
+      `✏️ <b>ALTERAR INSTRUÇÕES PÓS-ENTREGA</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Envie as instruções que serão entregues ao cliente junto com o link de ativação:\n\n` +
+        `<b>Texto atual:</b>\n${current}`,
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt() }
+    );
+  }
+
+  if (data === "adm_reset_texts") {
+    settingsRepo.delete("product_description");
+    settingsRepo.delete("faq_text");
+    settingsRepo.delete("post_delivery_text");
+    await ctx.reply("✅ <b>Todos os textos foram restaurados para o padrão original de fábrica!</b>", {
+      parse_mode: "HTML",
+    });
+    return showAdminPanel(ctx);
+  }
+
+  if (data === "adm_back_panel") {
+    return showAdminPanel(ctx);
+  }
+
   if (data === "adm_preview") {
     const config = settingsRepo.getConfig();
     return ctx.reply(
@@ -308,6 +370,33 @@ export async function handleAdminPrompt(ctx: Context, promptKey: string, text: s
         `• Falhas/Bloqueios: <b>${failed}</b>`,
       { parse_mode: "HTML", reply_markup: keyboards.adminMenu() }
     );
+  }
+
+  if (promptKey === "set_desc") {
+    settingsRepo.set("product_description", clean);
+    settingsRepo.updateConfig({ activePromptKey: "" });
+    await ctx.reply("✅ <b>Descrição do produto atualizada com sucesso!</b>\nSeus clientes já verão o novo texto no /start.", {
+      parse_mode: "HTML",
+    });
+    return showAdminPanel(ctx);
+  }
+
+  if (promptKey === "set_faq") {
+    settingsRepo.set("faq_text", clean);
+    settingsRepo.updateConfig({ activePromptKey: "" });
+    await ctx.reply("✅ <b>Texto de Dúvidas & Regras (FAQ) atualizado com sucesso!</b>", {
+      parse_mode: "HTML",
+    });
+    return showAdminPanel(ctx);
+  }
+
+  if (promptKey === "set_delivery") {
+    settingsRepo.set("post_delivery_text", clean);
+    settingsRepo.updateConfig({ activePromptKey: "" });
+    await ctx.reply("✅ <b>Instruções pós-entrega atualizadas com sucesso!</b>", {
+      parse_mode: "HTML",
+    });
+    return showAdminPanel(ctx);
   }
 }
 

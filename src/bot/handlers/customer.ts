@@ -27,11 +27,7 @@ export async function handleCustomerStart(ctx: Context) {
 
   const priceFormatted = config.salePriceBrl.toFixed(2).replace(".", ",");
 
-  const welcomeText =
-    `🏪 <b>${config.storeName.toUpperCase()}</b>\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `⭐ <b>GOOGLE 5TB + GEMINI PRO (18 MESES)</b>\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+  const defaultDesc =
     `<blockquote>` +
     `✅ <b>5.000 GB (5TB)</b> de espaço para Google Drive, Fotos e Gmail\n` +
     `✅ <b>IA Gemini 1.5 PRO</b> desbloqueada e ilimitada\n` +
@@ -39,7 +35,16 @@ export async function handleCustomerStart(ctx: Context) {
     `✅ Não precisa de senha (apenas convite oficial seguro)\n` +
     `✅ Duração de <b>18 Meses</b> garantidos\n` +
     `⚡ <b>Entrega imediata e automática via PIX</b>` +
-    `</blockquote>\n\n` +
+    `</blockquote>`;
+
+  const customDesc = settingsRepo.get("product_description", defaultDesc);
+
+  const welcomeText =
+    `🏪 <b>${config.storeName.toUpperCase()}</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `⭐ <b>GOOGLE 5TB + GEMINI PRO (18 MESES)</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `${customDesc}\n\n` +
     `💵 <b>Valor:</b> Apenas <b>R$ ${priceFormatted}</b> (Pagamento único)\n\n` +
     `Clique no botão abaixo para garantir o seu acesso com entrega instantânea:`;
 
@@ -54,7 +59,7 @@ export async function handleCustomerStart(ctx: Context) {
  */
 export async function handleCustomerFaq(ctx: Context) {
   const config = settingsRepo.getConfig();
-  const faqText =
+  const defaultFaq =
     `❓ <b>COMO FUNCIONA E DÚVIDAS FREQUENTES</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `🔹 <b>Preciso informar minha senha?</b>\n` +
@@ -65,6 +70,8 @@ export async function handleCustomerFaq(ctx: Context) {
     `Sim! Assim que o PIX for pago, nosso sistema valida automaticamente em menos de 3 segundos e entrega seu link aqui na conversa.\n\n` +
     `🔹 <b>Precisa de suporte?</b>\n` +
     `Fale diretamente com nosso atendimento: @${config.supportUsername || "Admin"}`;
+
+  const faqText = settingsRepo.get("faq_text", defaultFaq);
 
   return ctx.reply(faqText, {
     parse_mode: "HTML",
@@ -271,6 +278,16 @@ async function processSuccessfulDelivery(
   const link = deliveryResult.order.delivered_value;
   orderRepo.markDelivered(orderId, link);
 
+  const defaultInstructions =
+    `<blockquote>` +
+    `📖 <b>Como Ativar seu Acesso:</b>\n` +
+    `1. Clique no link acima para abrir o convite oficial do Google.\n` +
+    `2. Escolha sua conta Gmail pessoal e confirme o aceite.\n` +
+    `3. Pronto! Seus 5TB e Gemini PRO estarão ativos por 18 meses!` +
+    `</blockquote>`;
+
+  const customInstructions = settingsRepo.get("post_delivery_text", defaultInstructions);
+
   // 2. Mensagem formatada com spoiler para o cliente
   const successText =
     `🎉 <b>PAGAMENTO CONFIRMADO COM SUCESSO!</b>\n` +
@@ -279,12 +296,7 @@ async function processSuccessfulDelivery(
     `🆔 <b>Pedido:</b> <code>${orderId}</code>\n\n` +
     `🔑 <b>SEU LINK DE ATIVAÇÃO EXCLUSIVO:</b>\n` +
     `<tg-spoiler>${link}</tg-spoiler>\n\n` +
-    `<blockquote>` +
-    `📖 <b>Como Ativar seu Acesso:</b>\n` +
-    `1. Clique no link acima para abrir o convite oficial do Google.\n` +
-    `2. Escolha sua conta Gmail pessoal e confirme o aceite.\n` +
-    `3. Pronto! Seus 5TB e Gemini PRO estarão ativos por 18 meses!` +
-    `</blockquote>\n\n` +
+    `${customInstructions}\n\n` +
     `💬 Precisa de ajuda? Nosso suporte está à disposição: @${config.supportUsername || "Admin"}`;
 
   try {
