@@ -5,17 +5,30 @@ import { MasterApiClient } from "../../services/apiClient.js";
 import { MercadoPagoService } from "../../services/mercadopago.js";
 import { keyboards } from "../keyboards.js";
 
+let lastAdminPanelMessageId: number | null = null;
+
+export function setLastAdminPanelMessageId(id: number | null) {
+  lastAdminPanelMessageId = id;
+}
+
+export function getLastAdminPanelMessageId(): number | null {
+  return lastAdminPanelMessageId;
+}
+
 function isAdmin(ctx: Context): boolean {
   return !!(ctx.from && ctx.from.id === env.ADMIN_ID);
 }
 
 /**
- * Renderiza o painel de controle principal do Admin
+ * Renderiza o painel de controle principal do Admin (sempre reaproveitando a mensagem para zero poluição)
  */
-export async function showAdminPanel(ctx: Context, editMessage = false) {
+export async function showAdminPanel(ctx: Context, editMessage = false, targetMsgId?: number) {
   if (!isAdmin(ctx)) {
     return ctx.reply("⛔ Acesso não autorizado.");
   }
+
+  // Limpa prompt pendente
+  settingsRepo.updateConfig({ activePromptKey: "" });
 
   const config = settingsRepo.getConfig();
   const stats = orderRepo.getStats();
@@ -64,23 +77,41 @@ export async function showAdminPanel(ctx: Context, editMessage = false) {
     `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `<i>Clique nos botões abaixo para alterar qualquer configuração:</i>`;
 
-  if (editMessage && ctx.callbackQuery?.message) {
+  const msgIdToEdit =
+    targetMsgId || (ctx.callbackQuery?.message ? ctx.callbackQuery.message.message_id : lastAdminPanelMessageId);
+
+  if ((editMessage || ctx.callbackQuery?.message) && msgIdToEdit) {
     try {
-      return await ctx.editMessageText(text, {
+      await ctx.api.editMessageText(ctx.chat!.id, msgIdToEdit, text, {
         parse_mode: "HTML",
         reply_markup: keyboards.adminMenu(config.walletEnabled),
       });
+      lastAdminPanelMessageId = msgIdToEdit;
+      return;
     } catch {}
   }
 
-  return ctx.reply(text, {
+  // Se foi comando (/admin), apaga o comando digitado para manter o chat limpo
+  try {
+    await ctx.deleteMessage();
+  } catch {}
+
+  // Apaga painel anterior se ainda estiver aberto no chat
+  if (lastAdminPanelMessageId) {
+    try {
+      await ctx.api.deleteMessage(ctx.chat!.id, lastAdminPanelMessageId);
+    } catch {}
+  }
+
+  const sent = await ctx.reply(text, {
     parse_mode: "HTML",
     reply_markup: keyboards.adminMenu(config.walletEnabled),
   });
+  lastAdminPanelMessageId = sent.message_id;
 }
 
 /**
- * Trata o clique nos botões inline do /admin
+ * Trata o clique nos botões inline do /admin (editando em tempo real)
  */
 export async function handleAdminCallback(ctx: Context) {
   if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "⛔ Não autorizado." });
@@ -89,65 +120,55 @@ export async function handleAdminCallback(ctx: Context) {
 
   await ctx.answerCallbackQuery();
 
+  if (data === "adm_refresh" || data === "adm_back_panel" || data === "adm_cancel_prompt") {
+    return showAdminPanel(ctx, true);
+  }
+
   if (data === "adm_set_name") {
     settingsRepo.updateConfig({ activePromptKey: "set_name" });
-    return ctx.reply("🏷️ <b>Digite o novo nome para sua loja:</b>", {
-      parse_mode: "HTML",
-      reply_markup: keyboards.cancelPrompt(),
-    });
+    return ctx.editMessageText(
+      "🏷️ <b>ALTERAR NOME DA LOJA</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+        "Digite o novo nome para sua loja aqui na conversa:\n<i>(Exemplo: Minha Loja VIP)</i>",
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt() }
+    );
   }
 
   if (data === "adm_set_price") {
     settingsRepo.updateConfig({ activePromptKey: "set_price" });
-    return ctx.reply(
-      "💵 <b>Digite o novo preço de venda em Reais:</b>\n<i>(Exemplo: 29.90 ou 35.00)</i>",
-      {
-        parse_mode: "HTML",
-        reply_markup: keyboards.cancelPrompt(),
-      }
+    return ctx.editMessageText(
+      "💵 <b>ALTERAR PREÇO DE VENDA</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+        "Digite o novo preço de venda em Reais:\n<i>(Exemplo: 29.90 ou 35.00 — Custo API: R$ 15,00)</i>",
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt() }
     );
   }
 
   if (data === "adm_set_mp") {
     settingsRepo.updateConfig({ activePromptKey: "set_mp" });
-    return ctx.reply(
-      "💳 <b>Cole o seu novo Access Token do Mercado Pago:</b>\n" +
-        "<i>(A mensagem será apagada do chat assim que enviada por segurança)</i>",
-      {
-        parse_mode: "HTML",
-        reply_markup: keyboards.cancelPrompt(),
-      }
+    return ctx.editMessageText(
+      "💳 <b>TOKEN MERCADO PAGO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+        "Cole aqui o seu novo <b>Access Token de Produção</b>:\n" +
+        "<i>(Sua mensagem será apagada do chat imediatamente por segurança)</i>",
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt() }
     );
   }
 
   if (data === "adm_set_api") {
     settingsRepo.updateConfig({ activePromptKey: "set_api" });
-    return ctx.reply(
-      "🔑 <b>Cole a sua nova Chave de API de Revenda (gg_live_...):</b>\n" +
-        "<i>(A mensagem será apagada do chat assim que enviada por segurança)</i>",
-      {
-        parse_mode: "HTML",
-        reply_markup: keyboards.cancelPrompt(),
-      }
+    return ctx.editMessageText(
+      "🔑 <b>CHAVE DA API FORNECEDOR</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+        "Cole aqui a sua nova <b>Chave de API</b> (<code>gg_live_...</code>):\n" +
+        "<i>(Sua mensagem será apagada do chat imediatamente por segurança)</i>",
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt() }
     );
   }
 
   if (data === "adm_set_support") {
     settingsRepo.updateConfig({ activePromptKey: "set_support" });
-    return ctx.reply(
-      "💬 <b>Digite o novo @ do seu Telegram para suporte aos clientes:</b>\n<i>(Exemplo: @seu_usuario)</i>",
-      {
-        parse_mode: "HTML",
-        reply_markup: keyboards.cancelPrompt(),
-      }
+    return ctx.editMessageText(
+      "💬 <b>USUÁRIO DE SUPORTE</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+        "Digite o novo @ do seu Telegram para suporte aos clientes:\n<i>(Exemplo: @seu_usuario)</i>",
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt() }
     );
-  }
-
-  if (data === "adm_cancel_prompt") {
-    settingsRepo.updateConfig({ activePromptKey: "" });
-    return ctx.reply("❌ Alteração cancelada.", {
-      reply_markup: keyboards.adminMenu(),
-    });
   }
 
   if (data === "adm_simulate") {
@@ -174,7 +195,7 @@ export async function handleAdminCallback(ctx: Context) {
           .join("\n");
     }
 
-    return ctx.reply(
+    return ctx.editMessageText(
       `📊 <b>RELATÓRIO DE VENDAS & FATURAMENTO</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `• Pedidos Concluídos: <b>${stats.totalSales}</b>\n` +
@@ -182,41 +203,35 @@ export async function handleAdminCallback(ctx: Context) {
         `• Custo Total de Fornecimento: <b>R$ ${stats.totalCostBrl.toFixed(2)}</b>\n` +
         `• 💰 <b>Lucro Líquido Total: R$ ${stats.totalProfitBrl.toFixed(2)}</b>` +
         recentText,
-      { parse_mode: "HTML", reply_markup: keyboards.adminMenu() }
+      { parse_mode: "HTML", reply_markup: keyboards.adminBackOnly() }
     );
   }
 
   if (data === "adm_broadcast") {
     settingsRepo.updateConfig({ activePromptKey: "set_broadcast" });
-    return ctx.reply(
-      "📢 <b>Envio de Aviso para Todos os Clientes:</b>\n\n" +
+    return ctx.editMessageText(
+      "📢 <b>ENVIO DE COMUNICADO GERAL</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
         "Digite a mensagem que deseja transmitir para todos os usuários cadastrados no bot.\n" +
-        "<i>(Ou clique em Cancelar abaixo se mudou de ideia)</i>",
-      {
-        parse_mode: "HTML",
-        reply_markup: keyboards.cancelPrompt(),
-      }
+        "<i>(Ou clique em Cancelar abaixo para voltar ao painel)</i>",
+      { parse_mode: "HTML", reply_markup: keyboards.cancelPrompt() }
     );
   }
 
   if (data === "adm_texts") {
-    return ctx.reply(
+    return ctx.editMessageText(
       `📝 <b>PERSONALIZAÇÃO DE TEXTOS DA LOJA</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `Escolha qual mensagem você deseja personalizar:\n\n` +
         `• <b>Descrição do Produto:</b> Exibida no menu inicial do /start\n` +
         `• <b>Dúvidas & Regras (FAQ):</b> Exibida no botão 'Como Funciona'\n` +
         `• <b>Instruções Pós-Entrega:</b> Enviada junto com o link após a aprovação do PIX`,
-      {
-        parse_mode: "HTML",
-        reply_markup: keyboards.messagesMenu(),
-      }
+      { parse_mode: "HTML", reply_markup: keyboards.messagesMenu() }
     );
   }
 
   if (data === "adm_set_desc") {
     settingsRepo.updateConfig({ activePromptKey: "set_desc" });
     const current = settingsRepo.get("product_description", "<i>(Padrão de fábrica ativo)</i>");
-    return ctx.reply(
+    return ctx.editMessageText(
       `✏️ <b>ALTERAR DESCRIÇÃO DO PRODUTO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `Envie agora o texto que deseja exibir na tela principal do /start.\n` +
         `<i>(Suporta emojis e formatação HTML: &lt;b&gt;, &lt;i&gt;, &lt;blockquote&gt;)</i>\n\n` +
@@ -228,7 +243,7 @@ export async function handleAdminCallback(ctx: Context) {
   if (data === "adm_set_faq") {
     settingsRepo.updateConfig({ activePromptKey: "set_faq" });
     const current = settingsRepo.get("faq_text", "<i>(Padrão de fábrica ativo)</i>");
-    return ctx.reply(
+    return ctx.editMessageText(
       `✏️ <b>ALTERAR DÚVIDAS & REGRAS (FAQ)</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `Envie o texto que será exibido quando o cliente clicar em 'Como Funciona':\n\n` +
         `<b>Texto atual:</b>\n${current}`,
@@ -239,7 +254,7 @@ export async function handleAdminCallback(ctx: Context) {
   if (data === "adm_set_delivery") {
     settingsRepo.updateConfig({ activePromptKey: "set_delivery" });
     const current = settingsRepo.get("post_delivery_text", "<i>(Padrão de fábrica ativo)</i>");
-    return ctx.reply(
+    return ctx.editMessageText(
       `✏️ <b>ALTERAR INSTRUÇÕES PÓS-ENTREGA</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `Envie as instruções que serão entregues ao cliente junto com o link de ativação:\n\n` +
         `<b>Texto atual:</b>\n${current}`,
@@ -251,26 +266,19 @@ export async function handleAdminCallback(ctx: Context) {
     settingsRepo.delete("product_description");
     settingsRepo.delete("faq_text");
     settingsRepo.delete("post_delivery_text");
-    await ctx.reply("✅ <b>Todos os textos foram restaurados para o padrão original de fábrica!</b>", {
-      parse_mode: "HTML",
-    });
-    return showAdminPanel(ctx);
+    await ctx.answerCallbackQuery({ text: "✅ Textos restaurados para os padrões originais!" });
+    return showAdminPanel(ctx, true);
   }
 
   if (data === "adm_toggle_wallet") {
     const config = settingsRepo.getConfig();
-    const nextState = !config.walletEnabled;
-    settingsRepo.updateConfig({ walletEnabled: nextState });
+    settingsRepo.updateConfig({ walletEnabled: !config.walletEnabled });
     return showAdminPanel(ctx, true);
-  }
-
-  if (data === "adm_back_panel") {
-    return showAdminPanel(ctx);
   }
 
   if (data === "adm_preview") {
     const config = settingsRepo.getConfig();
-    return ctx.reply(
+    return ctx.editMessageText(
       `👁️ <b>Prévia da Loja (Visão do seu Cliente):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━`,
       {
         parse_mode: "HTML",
@@ -282,76 +290,130 @@ export async function handleAdminCallback(ctx: Context) {
 
 /**
  * Trata o texto digitado pelo Admin após clicar em um botão de configuração
+ * (apaga a mensagem do admin e atualiza a mensagem original no mesmo lugar)
  */
 export async function handleAdminPrompt(ctx: Context, promptKey: string, text: string) {
   if (!isAdmin(ctx)) return;
+
+  // Apaga a mensagem digitada pelo usuário imediatamente
+  try {
+    await ctx.deleteMessage();
+  } catch {}
+
   const clean = text.trim();
+  const targetId = lastAdminPanelMessageId;
+
+  const showPromptError = async (err: string) => {
+    if (targetId) {
+      try {
+        await ctx.api.editMessageText(ctx.chat!.id, targetId, `${err}\n\nTente novamente ou cancele:`, {
+          parse_mode: "HTML",
+          reply_markup: keyboards.cancelPrompt(),
+        });
+        return;
+      } catch {}
+    }
+    await ctx.reply(err, { reply_markup: keyboards.cancelPrompt() });
+  };
 
   if (promptKey === "set_name") {
     if (clean.length < 2 || clean.length > 40) {
-      return ctx.reply("❌ Digite um nome entre 2 e 40 caracteres.");
+      return showPromptError("❌ <b>Nome inválido!</b> Digite um nome entre 2 e 40 caracteres.");
     }
     settingsRepo.updateConfig({ storeName: clean, activePromptKey: "" });
-    await ctx.reply(`✅ Nome da loja alterado para: <b>${clean}</b>`, { parse_mode: "HTML" });
-    return showAdminPanel(ctx);
+    return showAdminPanel(ctx, true, targetId || undefined);
   }
 
   if (promptKey === "set_price") {
     const val = parseFloat(clean.replace(",", "."));
     if (isNaN(val) || val < 15.0) {
-      return ctx.reply("❌ O preço de venda deve ser um número maior que R$ 15,00 (custo de fábrica).");
+      return showPromptError(
+        "❌ <b>Preço inválido!</b> O valor de venda deve ser no mínimo R$ 15,00 (preço de custo de fábrica)."
+      );
     }
     settingsRepo.updateConfig({ salePriceBrl: val, activePromptKey: "" });
-    await ctx.reply(`✅ Preço atualizado para: <b>R$ ${val.toFixed(2)}</b>`, { parse_mode: "HTML" });
-    return showAdminPanel(ctx);
+    return showAdminPanel(ctx, true, targetId || undefined);
   }
 
   if (promptKey === "set_mp") {
-    try {
-      await ctx.deleteMessage();
-    } catch {}
+    if (targetId) {
+      try {
+        await ctx.api.editMessageText(ctx.chat!.id, targetId, "⏳ <i>Testando novo token do Mercado Pago...</i>", {
+          parse_mode: "HTML",
+        });
+      } catch {}
+    }
+
     const mp = new MercadoPagoService(clean);
     const test = await mp.testConnection();
     if (!test.ok) {
-      return ctx.reply(`❌ Token Mercado Pago inválido: ${test.error}`);
+      return showPromptError(`❌ <b>Token Mercado Pago inválido!</b>\n<i>${test.error}</i>`);
     }
     settingsRepo.updateConfig({ mpAccessToken: clean, activePromptKey: "" });
-    await ctx.reply(`✅ Mercado Pago atualizado com sucesso! (Conta: ${test.nickname})`);
-    return showAdminPanel(ctx);
+    return showAdminPanel(ctx, true, targetId || undefined);
   }
 
   if (promptKey === "set_api") {
-    try {
-      await ctx.deleteMessage();
-    } catch {}
+    if (targetId) {
+      try {
+        await ctx.api.editMessageText(ctx.chat!.id, targetId, "⏳ <i>Testando chave de API com o servidor...</i>", {
+          parse_mode: "HTML",
+        });
+      } catch {}
+    }
+
     const config = settingsRepo.getConfig();
     const client = new MasterApiClient(config.apiBaseUrl, clean);
     const acc = await client.getAccount();
     if (!acc.ok || !acc.user) {
-      return ctx.reply(`❌ Chave de API inválida: ${acc.error}`);
+      return showPromptError(`❌ <b>Chave de API inválida!</b>\n<i>${acc.error}</i>`);
     }
     settingsRepo.updateConfig({ resellerApiKey: clean, activePromptKey: "" });
-    await ctx.reply(
-      `✅ Chave de API conectada! (Saldo atual: R$ ${acc.user.balance_brl.toFixed(2)})`
-    );
-    return showAdminPanel(ctx);
+    return showAdminPanel(ctx, true, targetId || undefined);
   }
 
   if (promptKey === "set_support") {
     const user = clean.replace(/^@/, "");
     settingsRepo.updateConfig({ supportUsername: user, activePromptKey: "" });
-    await ctx.reply(`✅ Usuário de suporte atualizado para: @${user}`);
-    return showAdminPanel(ctx);
+    return showAdminPanel(ctx, true, targetId || undefined);
+  }
+
+  if (promptKey === "set_desc") {
+    settingsRepo.set("product_description", clean);
+    settingsRepo.updateConfig({ activePromptKey: "" });
+    return showAdminPanel(ctx, true, targetId || undefined);
+  }
+
+  if (promptKey === "set_faq") {
+    settingsRepo.set("faq_text", clean);
+    settingsRepo.updateConfig({ activePromptKey: "" });
+    return showAdminPanel(ctx, true, targetId || undefined);
+  }
+
+  if (promptKey === "set_delivery") {
+    settingsRepo.set("post_delivery_text", clean);
+    settingsRepo.updateConfig({ activePromptKey: "" });
+    return showAdminPanel(ctx, true, targetId || undefined);
   }
 
   if (promptKey === "set_broadcast") {
     settingsRepo.updateConfig({ activePromptKey: "" });
     const users = userRepo.getAll();
     if (users.length === 0) {
-      return ctx.reply("ℹ️ Nenhum cliente cadastrado no bot ainda.");
+      return showPromptError("ℹ️ Nenhum cliente cadastrado no bot ainda.");
     }
 
-    const wait = await ctx.reply(`⏳ Enviando aviso para ${users.length} usuários...`);
+    if (targetId) {
+      try {
+        await ctx.api.editMessageText(
+          ctx.chat!.id,
+          targetId,
+          `⏳ <i>Disparando aviso para ${users.length} usuários...</i>`,
+          { parse_mode: "HTML" }
+        );
+      } catch {}
+    }
+
     let sent = 0;
     let failed = 0;
 
@@ -369,46 +431,25 @@ export async function handleAdminPrompt(ctx: Context, promptKey: string, text: s
       await new Promise((r) => setTimeout(r, 40));
     }
 
-    return ctx.api.editMessageText(
-      ctx.chat!.id,
-      wait.message_id,
+    const report =
       `✅ <b>Aviso disparado com sucesso!</b>\n\n` +
-        `• Enviados: <b>${sent}</b>\n` +
-        `• Falhas/Bloqueios: <b>${failed}</b>`,
-      { parse_mode: "HTML", reply_markup: keyboards.adminMenu() }
-    );
-  }
+      `• Enviados com sucesso: <b>${sent}</b>\n` +
+      `• Bloqueios/Falhas: <b>${failed}</b>`;
 
-  if (promptKey === "set_desc") {
-    settingsRepo.set("product_description", clean);
-    settingsRepo.updateConfig({ activePromptKey: "" });
-    await ctx.reply("✅ <b>Descrição do produto atualizada com sucesso!</b>\nSeus clientes já verão o novo texto no /start.", {
-      parse_mode: "HTML",
-    });
-    return showAdminPanel(ctx);
-  }
-
-  if (promptKey === "set_faq") {
-    settingsRepo.set("faq_text", clean);
-    settingsRepo.updateConfig({ activePromptKey: "" });
-    await ctx.reply("✅ <b>Texto de Dúvidas & Regras (FAQ) atualizado com sucesso!</b>", {
-      parse_mode: "HTML",
-    });
-    return showAdminPanel(ctx);
-  }
-
-  if (promptKey === "set_delivery") {
-    settingsRepo.set("post_delivery_text", clean);
-    settingsRepo.updateConfig({ activePromptKey: "" });
-    await ctx.reply("✅ <b>Instruções pós-entrega atualizadas com sucesso!</b>", {
-      parse_mode: "HTML",
-    });
-    return showAdminPanel(ctx);
+    if (targetId) {
+      try {
+        return await ctx.api.editMessageText(ctx.chat!.id, targetId, report, {
+          parse_mode: "HTML",
+          reply_markup: keyboards.adminBackOnly(),
+        });
+      } catch {}
+    }
+    return ctx.reply(report, { parse_mode: "HTML", reply_markup: keyboards.adminBackOnly() });
   }
 }
 
 /**
- * Simulação de entrega de teste com custo zero
+ * Simulação de entrega de teste com custo zero (apresentada no painel sem criar mensagens extras)
  */
 export async function handleSimulateDelivery(ctx: Context) {
   if (!isAdmin(ctx)) return;
@@ -416,54 +457,53 @@ export async function handleSimulateDelivery(ctx: Context) {
   const mockId = `SIM-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
   const mockLink = `https://families.google.com/join/demo-invite-${Math.random().toString(36).substring(2, 9)}`;
 
-  // 1. Mensagem de aviso
-  await ctx.reply(
-    `🧪 <b>[SIMULAÇÃO DE TESTE — CUSTO R$ 0,00]</b>\n` +
-      `<i>Esta é exatamente a mensagem e link que o cliente recebe no Telegram assim que o PIX é aprovado:</i>\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━`,
-    { parse_mode: "HTML" }
-  );
-
-  // 2. Mensagem que o cliente recebe
-  const clientText =
-    `🎉 <b>PAGAMENTO CONFIRMADO COM SUCESSO!</b>\n` +
+  const text =
+    `🧪 <b>SIMULAÇÃO DE TESTE — CUSTO R$ 0,00</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `📦 <b>Produto:</b> Google 5TB - Gemini PRO 18 MESES\n` +
-    `🆔 <b>Pedido:</b> <code>${mockId}</code>\n\n` +
-    `🔑 <b>SEU LINK DE ATIVAÇÃO EXCLUSIVO:</b>\n` +
+    `🆔 <b>Pedido Simulado:</b> <code>${mockId}</code>\n\n` +
+    `🔑 <b>Link Exclusivo (Entregue com Spoiler ao Cliente):</b>\n` +
     `<tg-spoiler>${mockLink}</tg-spoiler>\n\n` +
-    `<blockquote>📖 <b>Instruções Rápidas:</b>\n` +
-    `1. Clique no link acima para abrir o convite oficial do Google.\n` +
-    `2. Aceite o convite com a sua conta Google Gmail.\n` +
-    `3. Pronto! Seus 5TB e Gemini PRO estarão ativos por 18 meses.</blockquote>\n\n` +
-    `💬 Dúvidas? Fale com nosso suporte a qualquer momento.`;
+    `<blockquote>📖 <b>Instruções Enviadas ao Cliente:</b>\n` +
+    `1. Clique no link para abrir o convite oficial do Google.\n` +
+    `2. Aceite com sua conta Google Gmail pessoal.\n` +
+    `3. Pronto! 5TB e Gemini PRO ativos por 18 meses!</blockquote>\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `💰 <b>Exemplo Financeiro da Venda:</b>\n` +
+    `• Recebido no Mercado Pago: <b>R$ 29,90</b>\n` +
+    `• Custo da API Mestra: <b>R$ 15,00</b>\n` +
+    `• <b>Seu Lucro Líquido: R$ 14,90</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `✅ <i>Nenhum centavo foi debitado da sua carteira nesta simulação.</i>`;
 
-  await ctx.reply(clientText, { parse_mode: "HTML" });
+  if (ctx.callbackQuery?.message) {
+    try {
+      return await ctx.editMessageText(text, {
+        parse_mode: "HTML",
+        reply_markup: keyboards.adminBackOnly(),
+      });
+    } catch {}
+  }
 
-  // 3. Notificação que o admin recebe no privado
-  return ctx.reply(
-    `📢 <b>[CÓPIA QUE O ADMIN RECEBE EM TEMPO REAL]</b>\n` +
-      `💰 <b>NOVA VENDA CONCLUÍDA!</b>\n\n` +
-      `👤 <b>Cliente:</b> ${ctx.from?.first_name || "Cliente Teste"} (ID: <code>${ctx.from?.id}</code>)\n` +
-      `💵 <b>Valor Recebido:</b> <code>R$ 29,90</code>\n` +
-      `📉 <b>Custo API:</b> <code>R$ 15,00</code>\n` +
-      `💰 <b>Seu Lucro Líquido:</b> <code>R$ 14,90</code>\n\n` +
-      `🔑 <b>Entregue ao cliente:</b>\n<code>${mockLink}</code>\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `✅ <i>Simulação concluída! Nenhum centavo foi debitado de fornecedores.</i>`,
-    { parse_mode: "HTML", reply_markup: keyboards.adminMenu() }
-  );
+  return ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: keyboards.adminBackOnly(),
+  });
 }
 
 /**
- * Autodiagnóstico completo de saúde do bot
+ * Autodiagnóstico completo de saúde do bot (editado no painel)
  */
 export async function handleDiagnostics(ctx: Context) {
   if (!isAdmin(ctx)) return;
 
-  const wait = await ctx.reply("⏳ <i>Executando autodiagnóstico completo...</i>", {
-    parse_mode: "HTML",
-  });
+  if (ctx.callbackQuery?.message) {
+    try {
+      await ctx.editMessageText("⏳ <i>Executando autodiagnóstico completo...</i>", {
+        parse_mode: "HTML",
+      });
+    } catch {}
+  }
 
   const config = settingsRepo.getConfig();
 
@@ -498,13 +538,24 @@ export async function handleDiagnostics(ctx: Context) {
     `• <b>Banco de Dados:</b> ${dbStatus} (${userCount} clientes)\n` +
     `• <b>Mercado Pago:</b> ${mpResult}\n` +
     `• <b>API Fornecedor:</b> ${apiResult}\n` +
-    `• <b>Preço Configurado:</b> R$ ${config.salePriceBrl.toFixed(2)}\n` +
+    `• <b>Preço de Venda:</b> R$ ${config.salePriceBrl.toFixed(2)}\n` +
+    `• <b>Suporte:</b> @${config.supportUsername || "Admin"}\n` +
+    `• <b>Carteira:</b> ${config.walletEnabled ? "🟢 Ativada" : "🔴 Desativada"}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `<i>Tudo verificado e funcionando de forma autônoma!</i>`;
+    `Tudo pronto e operando normalmente.`;
 
-  return ctx.api.editMessageText(ctx.chat!.id, wait.message_id, diagText, {
+  if (ctx.callbackQuery?.message) {
+    try {
+      return await ctx.editMessageText(diagText, {
+        parse_mode: "HTML",
+        reply_markup: keyboards.adminBackOnly(),
+      });
+    } catch {}
+  }
+
+  return ctx.reply(diagText, {
     parse_mode: "HTML",
-    reply_markup: keyboards.adminMenu(config.walletEnabled),
+    reply_markup: keyboards.adminBackOnly(),
   });
 }
 
@@ -517,12 +568,17 @@ export async function handleAdminAddSaldo(ctx: Context) {
   const text = ctx.message?.text || "";
   const parts = text.split(" ").filter(Boolean);
 
+  // Tenta apagar a mensagem com o comando para manter o chat limpo
+  try {
+    await ctx.deleteMessage();
+  } catch {}
+
   if (parts.length < 3) {
     return ctx.reply(
       "📌 <b>Uso do comando:</b>\n<code>/addsaldo [ID_USUARIO] [VALOR]</code>\n\n" +
         "<i>Exemplo para adicionar:</i> <code>/addsaldo 123456789 25.00</code>\n" +
         "<i>Exemplo para remover:</i> <code>/remsaldo 123456789 10.00</code>",
-      { parse_mode: "HTML" }
+      { parse_mode: "HTML", reply_markup: keyboards.adminBackOnly() }
     );
   }
 
@@ -530,7 +586,7 @@ export async function handleAdminAddSaldo(ctx: Context) {
   const rawValue = parseFloat(parts[2].replace(",", "."));
 
   if (isNaN(targetId) || isNaN(rawValue) || rawValue === 0) {
-    return ctx.reply("❌ ID de usuário ou valor inválido.");
+    return ctx.reply("❌ ID de usuário ou valor inválido.", { reply_markup: keyboards.adminBackOnly() });
   }
 
   const isRemoval = text.startsWith("/remsaldo") || rawValue < 0;
@@ -559,6 +615,6 @@ export async function handleAdminAddSaldo(ctx: Context) {
       `👤 <b>Usuário:</b> <code>${targetId}</code>\n` +
       `💵 <b>Valor:</b> R$ ${absValue.toFixed(2).replace(".", ",")}\n` +
       `💳 <b>Novo Saldo Atual:</b> R$ ${currentBal}`,
-    { parse_mode: "HTML" }
+    { parse_mode: "HTML", reply_markup: keyboards.adminBackOnly() }
   );
 }

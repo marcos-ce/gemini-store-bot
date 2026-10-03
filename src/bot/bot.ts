@@ -25,8 +25,8 @@ import {
 import { startWizard, handleWizardStep } from "./handlers/wizard.js";
 import { keyboards } from "./keyboards.js";
 
-// Rastreamento de clientes digitando valor de recarga personalizada
-const customDepositPromptUsers = new Set<number>();
+// Rastreamento de clientes digitando valor de recarga personalizada (userId -> promptMsgId)
+const customDepositPromptUsers = new Map<number, number>();
 
 export function createBot(): Bot {
   if (!env.BOT_TOKEN) {
@@ -69,14 +69,25 @@ export function createBot(): Bot {
   bot.callbackQuery("wiz_start", (ctx) => {
     if (ctx.from?.id === env.ADMIN_ID) return startWizard(ctx);
   });
+
   bot.callbackQuery("nav_support", async (ctx) => {
     const config = settingsRepo.getConfig();
     await ctx.answerCallbackQuery();
-    return ctx.reply(
-      `💬 <b>SUPORTE & ATENDIMENTO</b>\n\n` +
-        `Para dúvidas sobre pedidos, pagamentos ou suporte técnico, fale diretamente com: @${config.supportUsername || "Admin"}`,
-      { parse_mode: "HTML" }
-    );
+    const text =
+      `💬 <b>SUPORTE & ATENDIMENTO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `Para dúvidas sobre seu pedido, ativação ou pagamentos, nossa equipe está à disposição para te atender:\n\n` +
+      `👉 Atendimento oficial: <b>@${config.supportUsername || "Admin"}</b>`;
+
+    if (ctx.callbackQuery?.message?.text) {
+      return ctx.editMessageText(text, {
+        parse_mode: "HTML",
+        reply_markup: keyboards.supportMenu(config.supportUsername),
+      });
+    }
+    return ctx.reply(text, {
+      parse_mode: "HTML",
+      reply_markup: keyboards.supportMenu(config.supportUsername),
+    });
   });
 
   // Callbacks de Recarga de Carteira
@@ -89,12 +100,27 @@ export function createBot(): Bot {
   bot.callbackQuery("dep_custom", async (ctx) => {
     if (!ctx.from) return;
     await ctx.answerCallbackQuery();
-    customDepositPromptUsers.add(ctx.from.id);
-    return ctx.reply(
-      "💵 <b>Qual valor você deseja recarregar na sua carteira?</b>\n\n" +
-        "Digite o valor em Reais (exemplo: <code>45.00</code> ou <code>100.00</code>):",
-      { parse_mode: "HTML" }
-    );
+    const promptText =
+      "💵 <b>RECARGA DE VALOR PERSONALIZADO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+      "Digite o valor em Reais que deseja adicionar à sua carteira:\n" +
+      "<i>(Exemplo: <code>45.00</code> ou <code>100.00</code> — Mínimo: R$ 5,00)</i>";
+
+    if (ctx.callbackQuery?.message?.text) {
+      try {
+        await ctx.editMessageText(promptText, {
+          parse_mode: "HTML",
+          reply_markup: keyboards.cancelPrompt("nav_wallet"),
+        });
+        customDepositPromptUsers.set(ctx.from.id, ctx.callbackQuery.message.message_id);
+        return;
+      } catch {}
+    }
+
+    const sent = await ctx.reply(promptText, {
+      parse_mode: "HTML",
+      reply_markup: keyboards.cancelPrompt("nav_wallet"),
+    });
+    customDepositPromptUsers.set(ctx.from.id, sent.message_id);
   });
 
   bot.callbackQuery(/^check_dep_(.+)$/, async (ctx) => {
@@ -125,14 +151,44 @@ export function createBot(): Bot {
   bot.on("message:text", async (ctx) => {
     // 1. Verifica se o cliente está digitando valor de recarga personalizada
     if (customDepositPromptUsers.has(ctx.from.id)) {
+      const promptMsgId = customDepositPromptUsers.get(ctx.from.id);
       customDepositPromptUsers.delete(ctx.from.id);
+
+      // Apaga o que o usuário digitou para não deixar lixo no chat
+      try {
+        await ctx.deleteMessage();
+      } catch {}
+
       const text = ctx.message.text.trim();
       const val = parseFloat(text.replace(",", "."));
       if (isNaN(val) || val < 5.0) {
-        return ctx.reply("❌ Valor mínimo para recarga via PIX é de R$ 5,00. Tente novamente clicando em Recarregar.", {
-          reply_markup: keyboards.customerMain(settingsRepo.getConfig().salePriceBrl, settingsRepo.getConfig().supportUsername, true),
+        if (promptMsgId) {
+          try {
+            await ctx.api.editMessageText(
+              ctx.chat.id,
+              promptMsgId,
+              "❌ <b>Valor inválido!</b> O valor mínimo para recarga via PIX é de <b>R$ 5,00</b>.\n\nDigite novamente ou clique em Cancelar:",
+              {
+                parse_mode: "HTML",
+                reply_markup: keyboards.cancelPrompt("nav_wallet"),
+              }
+            );
+            customDepositPromptUsers.set(ctx.from.id, promptMsgId);
+            return;
+          } catch {}
+        }
+        return ctx.reply("❌ Valor mínimo para recarga via PIX é de R$ 5,00. Tente novamente:", {
+          reply_markup: keyboards.cancelPrompt("nav_wallet"),
         });
       }
+
+      // Apaga a mensagem do prompt anterior para dar lugar limpo ao QR Code
+      if (promptMsgId) {
+        try {
+          await ctx.api.deleteMessage(ctx.chat.id, promptMsgId);
+        } catch {}
+      }
+
       return handleDepositSelect(ctx, val);
     }
 

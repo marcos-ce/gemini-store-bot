@@ -28,6 +28,35 @@ export const keyboards = {
   },
 
   /**
+   * Menu da tela de FAQ / Como Funciona
+   */
+  faqMenu(): InlineKeyboard {
+    return new InlineKeyboard()
+      .text("⭐ Comprar Agora", "buy_now")
+      .row()
+      .text("↩️ Voltar para a Loja", "nav_home");
+  },
+
+  /**
+   * Menu da tela de Suporte
+   */
+  supportMenu(supportUsername?: string): InlineKeyboard {
+    const kb = new InlineKeyboard();
+    if (supportUsername) {
+      kb.url("💬 Falar com Atendente", `https://t.me/${supportUsername.replace(/^@/, "")}`).row();
+    }
+    kb.text("↩️ Voltar para a Loja", "nav_home");
+    return kb;
+  },
+
+  /**
+   * Teclado com botão único para voltar ao painel admin
+   */
+  adminBackOnly(): InlineKeyboard {
+    return new InlineKeyboard().text("↩️ Voltar ao Painel", "adm_back_panel");
+  },
+
+  /**
    * Menu da Carteira do Cliente
    */
   walletMenu(balanceBrl: number): InlineKeyboard {
@@ -145,8 +174,8 @@ export const keyboards = {
   /**
    * Botão de cancelamento de prompt de digitação
    */
-  cancelPrompt(): InlineKeyboard {
-    return new InlineKeyboard().text("❌ Cancelar", "adm_cancel_prompt");
+  cancelPrompt(targetCallback = "adm_cancel_prompt"): InlineKeyboard {
+    return new InlineKeyboard().text("❌ Cancelar", targetCallback);
   },
 
   /**

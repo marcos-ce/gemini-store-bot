@@ -10,6 +10,33 @@ import { startWizard } from "./wizard.js";
 const activePollingMap = new Set<string>();
 
 /**
+ * Helper para navegação limpa: edita a mensagem existente se foi acionada por botão inline,
+ * ou envia nova mensagem se for comando inicial (/start) ou mensagem incompatível.
+ */
+export async function editOrReply(
+  ctx: Context,
+  text: string,
+  options: { parse_mode?: "HTML" | "Markdown" | "MarkdownV2"; reply_markup?: any }
+) {
+  if (ctx.callbackQuery?.message) {
+    try {
+      // Se a mensagem anterior é texto, edita no mesmo lugar
+      if (ctx.callbackQuery.message.text) {
+        return await ctx.editMessageText(text, options);
+      }
+      // Se for mídia (ex: foto de QR Code anterior), apaga a mídia para limpar o chat
+      try {
+        await ctx.deleteMessage();
+      } catch {}
+      return await ctx.reply(text, options);
+    } catch {
+      return await ctx.reply(text, options);
+    }
+  }
+  return await ctx.reply(text, options);
+}
+
+/**
  * Boas-vindas para clientes (/start)
  */
 export async function handleCustomerStart(ctx: Context) {
@@ -48,7 +75,7 @@ export async function handleCustomerStart(ctx: Context) {
     `💵 <b>Valor:</b> Apenas <b>R$ ${priceFormatted}</b> (Pagamento único)\n\n` +
     `Clique no botão abaixo para garantir o seu acesso com entrega instantânea:`;
 
-  return ctx.reply(welcomeText, {
+  return editOrReply(ctx, welcomeText, {
     parse_mode: "HTML",
     reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
   });
@@ -73,9 +100,9 @@ export async function handleCustomerFaq(ctx: Context) {
 
   const faqText = settingsRepo.get("faq_text", defaultFaq);
 
-  return ctx.reply(faqText, {
+  return editOrReply(ctx, faqText, {
     parse_mode: "HTML",
-    reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+    reply_markup: keyboards.faqMenu(),
   });
 }
 
@@ -87,7 +114,7 @@ export async function handleWallet(ctx: Context) {
   const config = settingsRepo.getConfig();
 
   if (!config.walletEnabled) {
-    return ctx.reply("ℹ️ O sistema de carteira está desativado nesta loja.", {
+    return editOrReply(ctx, "ℹ️ O sistema de carteira está desativado nesta loja.", {
       reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, false),
     });
   }
@@ -109,7 +136,7 @@ export async function handleWallet(ctx: Context) {
     `</blockquote>\n\n` +
     `Escolha um valor abaixo para recarregar via PIX automático:`;
 
-  return ctx.reply(text, {
+  return editOrReply(ctx, text, {
     parse_mode: "HTML",
     reply_markup: keyboards.walletMenu(balBrl),
   });
@@ -124,6 +151,13 @@ export async function handleDepositSelect(ctx: Context, amountBrl: number) {
 
   if (!config.mpAccessToken) {
     return ctx.reply("⚠️ Sistema de recarga em rápida manutenção.");
+  }
+
+  // Se veio de um clique em botão, apaga a mensagem do menu anterior para não deixar lixo
+  if (ctx.callbackQuery?.message) {
+    try {
+      await ctx.deleteMessage();
+    } catch {}
   }
 
   const waitMsg = await ctx.reply("⏳ <i>Gerando PIX de recarga...</i>", { parse_mode: "HTML" });
@@ -213,7 +247,7 @@ function startDepositPolling(ctx: Context, depId: string, mpPaymentId: string, m
     if (status.approved) {
       clearInterval(interval);
       activePollingMap.delete(depId);
-      await processSuccessfulDeposit(ctx, depId);
+      await processSuccessfulDeposit(ctx, depId, messageId);
     }
   }, 3500);
 }
@@ -221,7 +255,7 @@ function startDepositPolling(ctx: Context, depId: string, mpPaymentId: string, m
 /**
  * Credita o saldo na carteira e notifica
  */
-async function processSuccessfulDeposit(ctx: Context, depId: string) {
+async function processSuccessfulDeposit(ctx: Context, depId: string, messageId?: number) {
   const dep = depositRepo.getById(depId);
   if (!dep || dep.status === "approved") return;
 
@@ -231,6 +265,13 @@ async function processSuccessfulDeposit(ctx: Context, depId: string) {
   const newBalCents = userRepo.addBalance(dep.user_id, dep.amount_cents);
   const newBalBrl = (newBalCents / 100).toFixed(2).replace(".", ",");
   const depBrl = (dep.amount_cents / 100).toFixed(2).replace(".", ",");
+
+  // Apaga a foto com o QR Code antigo para não poluir o histórico
+  if (messageId) {
+    try {
+      await ctx.api.deleteMessage(dep.user_id, messageId);
+    } catch {}
+  }
 
   // Notifica o cliente
   try {
@@ -295,7 +336,8 @@ export async function handleBuyNow(ctx: Context) {
       const priceFormatted = config.salePriceBrl.toFixed(2).replace(".", ",");
       const balFormatted = balBrl.toFixed(2).replace(".", ",");
 
-      return ctx.reply(
+      return editOrReply(
+        ctx,
         `💳 <b>COMO DESEJA CONCLUIR SEU PEDIDO?</b>\n` +
           `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
           `📦 <b>Produto:</b> Google 5TB - Gemini PRO 18 MESES\n` +
@@ -326,12 +368,31 @@ export async function handleBuyWithWallet(ctx: Context) {
   // 1. Débito atômico na carteira local
   const debited = userRepo.debitBalance(ctx.from.id, priceCents);
   if (!debited) {
+    if (ctx.callbackQuery) {
+      return ctx.answerCallbackQuery({
+        text: "❌ Saldo insuficiente na carteira para concluir esta compra.",
+        show_alert: true,
+      });
+    }
     return ctx.reply("❌ Saldo insuficiente na carteira para concluir esta compra.");
   }
 
-  const waitMsg = await ctx.reply("⏳ <i>Emitindo seu produto imediatamente via API...</i>", {
-    parse_mode: "HTML",
-  });
+  let targetMsgId: number | undefined;
+  if (ctx.callbackQuery?.message?.text) {
+    try {
+      await ctx.editMessageText("⏳ <i>Emitindo seu produto imediatamente via API...</i>", {
+        parse_mode: "HTML",
+      });
+      targetMsgId = ctx.callbackQuery.message.message_id;
+    } catch {}
+  }
+
+  if (!targetMsgId) {
+    const waitMsg = await ctx.reply("⏳ <i>Emitindo seu produto imediatamente via API...</i>", {
+      parse_mode: "HTML",
+    });
+    targetMsgId = waitMsg.message_id;
+  }
 
   const orderId = `ORD-${Date.now().toString(36).toUpperCase()}`;
 
@@ -355,10 +416,14 @@ export async function handleBuyWithWallet(ctx: Context) {
     try {
       await ctx.api.editMessageText(
         ctx.chat!.id,
-        waitMsg.message_id,
+        targetMsgId,
         `⚠️ <b>Falha temporária no fornecimento.</b>\n` +
           `O valor foi <b>estornado integralmente</b> para sua carteira.\n` +
-          `Erro: ${deliveryResult.error || "Tente novamente em instantes."}`
+          `Erro: ${deliveryResult.error || "Tente novamente em instantes."}`,
+        {
+          parse_mode: "HTML",
+          reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+        }
       );
     } catch {}
 
@@ -398,11 +463,15 @@ export async function handleBuyWithWallet(ctx: Context) {
     `💬 Precisa de ajuda? Nosso suporte está à disposição: @${config.supportUsername || "Admin"}`;
 
   try {
-    await ctx.api.editMessageText(ctx.chat!.id, waitMsg.message_id, successText, {
+    await ctx.api.editMessageText(ctx.chat!.id, targetMsgId, successText, {
       parse_mode: "HTML",
+      reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
     });
   } catch {
-    await ctx.reply(successText, { parse_mode: "HTML" });
+    await ctx.reply(successText, {
+      parse_mode: "HTML",
+      reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+    });
   }
 
   // Notificação para o dono
@@ -431,6 +500,14 @@ export async function executeDirectPixCheckout(ctx: Context) {
   if (!ctx.from) return;
 
   const config = settingsRepo.getConfig();
+
+  // Apaga menu anterior para exibir apenas a tela de pagamento limpa
+  if (ctx.callbackQuery?.message) {
+    try {
+      await ctx.deleteMessage();
+    } catch {}
+  }
+
   const waitMsg = await ctx.reply("⏳ <i>Gerando seu QR Code PIX exclusivo...</i>", {
     parse_mode: "HTML",
   });
@@ -455,7 +532,10 @@ export async function executeDirectPixCheckout(ctx: Context) {
       waitMsg.message_id,
       "⚠️ <b>Produto em reposição momentânea de estoque.</b>\n\n" +
         "Nossa equipe já foi notificada e em poucos instantes o estoque estará renovado. Tente novamente em alguns minutos!",
-      { parse_mode: "HTML" }
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+      }
     );
   }
 
@@ -473,7 +553,10 @@ export async function executeDirectPixCheckout(ctx: Context) {
     return ctx.api.editMessageText(
       ctx.chat!.id,
       waitMsg.message_id,
-      `❌ Falha ao emitir PIX: ${pixResult.error || "Tente novamente mais tarde."}`
+      `❌ Falha ao emitir PIX: ${pixResult.error || "Tente novamente mais tarde."}`,
+      {
+        reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+      }
     );
   }
 
@@ -595,7 +678,10 @@ async function processSuccessfulDelivery(
       `✅ <b>Seu pagamento foi confirmado com sucesso!</b>\n\n` +
         `Nosso sistema está finalizando os detalhes do seu acesso. Caso não receba em até 5 minutos, fale com nosso suporte: @${config.supportUsername || "Admin"}\n` +
         `🆔 Pedido: <code>${orderId}</code>`,
-      { parse_mode: "HTML" }
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+      }
     );
   }
 
@@ -622,8 +708,18 @@ async function processSuccessfulDelivery(
     `${customInstructions}\n\n` +
     `💬 Precisa de ajuda? Nosso suporte está à disposição: @${config.supportUsername || "Admin"}`;
 
+  // Apaga a mensagem com a foto do QR Code que já foi paga para deixar o chat 100% limpo
+  if (messageId) {
+    try {
+      await ctx.api.deleteMessage(order.user_id, messageId);
+    } catch {}
+  }
+
   try {
-    await ctx.api.sendMessage(order.user_id, successText, { parse_mode: "HTML" });
+    await ctx.api.sendMessage(order.user_id, successText, {
+      parse_mode: "HTML",
+      reply_markup: keyboards.customerMain(config.salePriceBrl, config.supportUsername, config.walletEnabled),
+    });
   } catch {}
 
   const profit = config.salePriceBrl - 15.0;
@@ -665,7 +761,8 @@ export async function handleCheckPix(ctx: Context, orderId: string) {
 
   if (status.approved) {
     await ctx.answerCallbackQuery({ text: "✅ Pagamento aprovado! Entregando..." });
-    return processSuccessfulDelivery(ctx, orderId, order.mp_payment_id);
+    const msgId = ctx.callbackQuery?.message?.message_id;
+    return processSuccessfulDelivery(ctx, orderId, order.mp_payment_id, msgId);
   }
 
   return ctx.answerCallbackQuery({
@@ -695,7 +792,8 @@ export async function handleCheckDeposit(ctx: Context, depId: string) {
 
   if (status.approved) {
     await ctx.answerCallbackQuery({ text: "✅ Pagamento aprovado! Creditando saldo..." });
-    return processSuccessfulDeposit(ctx, depId);
+    const msgId = ctx.callbackQuery?.message?.message_id;
+    return processSuccessfulDeposit(ctx, depId, msgId);
   }
 
   return ctx.answerCallbackQuery({
@@ -712,13 +810,7 @@ export async function handleCancelPix(ctx: Context, orderId: string) {
   try {
     await ctx.deleteMessage();
   } catch {}
-  return ctx.reply("❌ Pedido cancelado. Quando quiser comprar novamente, basta clicar no botão abaixo:", {
-    reply_markup: keyboards.customerMain(
-      settingsRepo.getConfig().salePriceBrl,
-      settingsRepo.getConfig().supportUsername,
-      settingsRepo.getConfig().walletEnabled
-    ),
-  });
+  return handleCustomerStart(ctx);
 }
 
 /**
@@ -729,11 +821,5 @@ export async function handleCancelDeposit(ctx: Context, depId: string) {
   try {
     await ctx.deleteMessage();
   } catch {}
-  return ctx.reply("❌ Recarga cancelada.", {
-    reply_markup: keyboards.customerMain(
-      settingsRepo.getConfig().salePriceBrl,
-      settingsRepo.getConfig().supportUsername,
-      settingsRepo.getConfig().walletEnabled
-    ),
-  });
+  return handleWallet(ctx);
 }
