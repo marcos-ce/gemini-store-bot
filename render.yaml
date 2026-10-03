@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: gemini-store-bot
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: API_BASE_URL
+        value: https://api.bunaistore.shop/v1
