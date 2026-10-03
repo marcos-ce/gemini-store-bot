@@ -12,4 +12,4 @@ services:
       - key: ADMIN_ID
         sync: false
       - key: API_BASE_URL
-        value: https://api.bunaistore.shop/v1
+        value: https://api.hewhotries.tech/v1

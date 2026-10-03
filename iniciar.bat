@@ -31,7 +31,7 @@ if not exist .env (
     
     echo BOT_TOKEN=!BOT_TOKEN!> .env
     echo ADMIN_ID=!ADMIN_ID!>> .env
-    echo API_BASE_URL=https://api.bunaistore.shop/v1>> .env
+    echo API_BASE_URL=https://api.hewhotries.tech/v1>> .env
     
     echo.
     echo [OK] Arquivo .env criado com sucesso!

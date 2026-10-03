@@ -26,7 +26,7 @@ if [ ! -f .env ]; then
   cat <<EOF > .env
 BOT_TOKEN=${USER_BOT_TOKEN}
 ADMIN_ID=${USER_ADMIN_ID}
-API_BASE_URL=https://api.bunaistore.shop/v1
+API_BASE_URL=https://api.hewhotries.tech/v1
 EOF
 fi
 

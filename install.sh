@@ -56,7 +56,7 @@ if [ ! -f .env ]; then
   read -rp "👉 URL da API Mestra [Pressione ENTER para padrão]: " USER_API_URL
 
   if [ -z "$USER_API_URL" ]; then
-    USER_API_URL="https://api.bunaistore.shop/v1"
+    USER_API_URL="https://api.hewhotries.tech/v1"
   fi
 
   cat <<EOF > .env
