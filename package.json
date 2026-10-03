@@ -1,0 +1,33 @@
+{
+  "name": "gemini-store-bot",
+  "version": "1.0.0",
+  "description": "Bot de vendas automatizado e autônomo para Telegram integrado com Mercado Pago e API GGBot",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "mercadopago",
+    "pix",
+    "gemini",
+    "whitelabel"
+  ],
+  "author": "GGBot Systems",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "grammy": "^1.35.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "@types/qrcode": "^1.5.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
