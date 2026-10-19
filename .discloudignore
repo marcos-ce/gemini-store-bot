@@ -1,0 +1,8 @@
+.git
+.github
+node_modules
+src
+store.db
+store.db-journal
+tsconfig.json
+README.md
