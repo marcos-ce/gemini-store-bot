@@ -1,0 +1,33 @@
+name: Deploy to Discloud
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Instalar Dependências e Compilar
+        run: |
+          npm ci
+          npm run build
+
+      - name: Compactar Pacote de Deploy
+        run: |
+          zip -r discloud.zip dist package.json package-lock.json discloud.config
+
+      - name: Enviar para a Discloud
+        uses: discloudapp/discloud-action@v2
+        with:
+          token: ${{ secrets.DISCLOUD_TOKEN }}
+          file: discloud.zip
